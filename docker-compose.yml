@@ -1,0 +1,58 @@
+version: '3.9'
+
+services:
+
+  app:
+    build: .
+    env_file: .env
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    volumes:
+      - .:/app
+
+  neo4j:
+    image: neo4j:5.15
+    ports:
+      - '7474:7474'
+      - '7687:7687'
+    environment:
+      NEO4J_AUTH: neo4j/apexpassword
+      NEO4J_PLUGINS: '["graph-data-science"]'
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ['CMD', 'cypher-shell', '-u', 'neo4j', '-p', 'apexpassword', 'RETURN 1']
+      interval: 10s
+      timeout: 10s
+      retries: 10
+
+  postgres:
+    image: postgres:15
+    ports:
+      - '5434:5432'
+    environment:
+      POSTGRES_USER: apex
+      POSTGRES_PASSWORD: apexpassword
+      POSTGRES_DB: apex_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U apex -d apex_db']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+
+volumes:
+  neo4j_data:
+  postgres_data:
+  redis_data:
