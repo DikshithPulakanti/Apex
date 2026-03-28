@@ -1,4 +1,25 @@
+# Environment variables — never commit these
 .env
+
+# Python
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+*.py[cod]
+
+# Mac
 .DS_Store
+
+# Virtual environments
+.venv
+env/
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# Docker
+*.log
