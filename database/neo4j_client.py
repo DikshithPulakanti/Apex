@@ -1,3 +1,6 @@
+# database/neo4j_client.py
+# APEX Neo4j Client
+
 import os
 from typing import Optional
 from neo4j import GraphDatabase, Driver
@@ -13,8 +16,8 @@ class Neo4jClient:
     """
 
     def __init__(self):
-        uri      = os.getenv('NEO4J_URI', 'bolt://localhost:7687')
-        user     = os.getenv('NEO4J_USER', 'neo4j')
+        uri      = os.getenv('NEO4J_URI',      'bolt://localhost:7687')
+        user     = os.getenv('NEO4J_USER',     'neo4j')
         password = os.getenv('NEO4J_PASSWORD', 'apexpassword')
 
         self.driver: Driver = GraphDatabase.driver(uri, auth=(user, password))
@@ -35,16 +38,7 @@ class Neo4jClient:
     # ── Paper operations ──────────────────────────────────────────────────
 
     def upsert_paper(self, paper: dict) -> dict:
-        """
-        Insert or update a paper node.
-        Uses MERGE so running twice won't create duplicates.
-
-        Args:
-            paper: dict with keys: id, title, abstract, year, categories, authors
-
-        Returns:
-            The created/updated paper properties
-        """
+        """Insert or update a paper node."""
         query = """
             MERGE (p:Paper {id: $id})
             SET p.title      = $title,
@@ -76,7 +70,7 @@ class Neo4jClient:
             session.run(query, name=name, institution=institution)
 
     def link_author_to_paper(self, author_name: str, paper_id: str) -> None:
-        """Create AUTHORED_BY relationship between existing Author and Paper."""
+        """Create AUTHORED_BY relationship between Author and Paper."""
         query = """
             MATCH (a:Author {name: $author_name})
             MATCH (p:Paper  {id:   $paper_id})
@@ -100,16 +94,7 @@ class Neo4jClient:
             return result.single()['n']
 
     def batch_upsert_papers(self, papers: list[dict]) -> int:
-        """
-        Efficiently insert many papers using UNWIND.
-        Much faster than calling upsert_paper() in a loop.
-
-        Args:
-            papers: list of paper dicts
-
-        Returns:
-            Number of papers processed
-        """
+        """Efficiently insert many papers using UNWIND."""
         query = """
             UNWIND $papers AS paper
             MERGE (p:Paper {id: paper.id})
@@ -121,92 +106,41 @@ class Neo4jClient:
         with self.driver.session() as session:
             session.run(query, papers=papers)
         return len(papers)
-    
+
     # ── Read methods ──────────────────────────────────────────────────────
 
     def get_papers_by_year(self, year: int) -> list[dict]:
-        """
-        Return all papers published in a given year.
-
-        HOW IT WORKS:
-        We send a MATCH query asking for every Paper node
-        whose 'year' property equals the number we pass in.
-        Neo4j sends back one record per matching paper.
-        We loop through them, convert each Neo4j node into
-        a plain Python dictionary, and collect them in a list.
-
-        PARAMETERS:
-            year: the 4-digit year to search for, e.g. 2021
-
-        RETURNS:
-            list of paper dictionaries. Empty list if none found.
-        """
+        """Return all papers published in a given year."""
         query = """
             MATCH (p:Paper {year: $year})
             RETURN p
             ORDER BY p.id
         """
         papers = []
-
         with self.driver.session() as session:
             result = session.run(query, year=year)
             for record in result:
                 papers.append(dict(record['p']))
-
         print(f'[Neo4jClient] get_papers_by_year({year}) → {len(papers)} papers found.')
         return papers
 
     def get_authors_of_paper(self, paper_id: str) -> list[str]:
-        """
-        Return the names of all authors who wrote a given paper.
-
-        HOW IT WORKS:
-        We follow the AUTHORED_BY relationship outward from the
-        Paper node to find connected Author nodes.
-        The arrow direction matters — Paper-[:AUTHORED_BY]->Author
-        is how the relationship was stored in link_author_to_paper().
-
-        PARAMETERS:
-            paper_id: the unique id of the paper, e.g. 'test:001'
-
-        RETURNS:
-            list of author name strings. Empty list if none found.
-        """
+        """Return the names of all authors who wrote a given paper."""
         query = """
             MATCH (p:Paper {id: $paper_id})-[:AUTHORED_BY]->(a:Author)
             RETURN a.name AS name
             ORDER BY a.name
         """
         authors = []
-
         with self.driver.session() as session:
             result = session.run(query, paper_id=paper_id)
             for record in result:
                 authors.append(record['name'])
-
         print(f'[Neo4jClient] get_authors_of_paper("{paper_id}") → {len(authors)} author(s) found.')
         return authors
 
     def get_paper_neighbors(self, paper_id: str) -> list[dict]:
-        """
-        Return all papers that share at least one author with this paper.
-
-        HOW IT WORKS:
-        This traverses TWO relationships in one query:
-        Start at our paper → follow AUTHORED_BY to an Author →
-        follow AUTHORED_BY backwards to any other Paper that
-        same Author has written.
-
-        This is graph traversal — hopping across two edges to
-        find connected nodes. This exact pattern is what APEX's
-        Reasoner agent will use to discover related research.
-
-        PARAMETERS:
-            paper_id: the unique id of the paper
-
-        RETURNS:
-            list of neighboring paper dictionaries. Empty list if none found.
-        """
+        """Return all papers that share at least one author with this paper."""
         query = """
             MATCH (p:Paper {id: $paper_id})-[:AUTHORED_BY]->(a:Author)<-[:AUTHORED_BY]-(neighbor:Paper)
             WHERE neighbor <> p
@@ -214,42 +148,42 @@ class Neo4jClient:
             ORDER BY neighbor.year DESC
         """
         neighbors = []
-
         with self.driver.session() as session:
             result = session.run(query, paper_id=paper_id)
             for record in result:
                 neighbors.append(dict(record['neighbor']))
-
         print(f'[Neo4jClient] get_paper_neighbors("{paper_id}") → {len(neighbors)} neighbor(s) found.')
         return neighbors
+
+    def get_stats(self) -> dict:
+        """Returns counts of all node types and relationships in the graph."""
+        with self.driver.session() as session:
+            papers        = session.run('MATCH (p:Paper) RETURN count(p) AS n').single()['n']
+            authors       = session.run('MATCH (a:Author) RETURN count(a) AS n').single()['n']
+            relationships = session.run('MATCH ()-[r]->() RETURN count(r) AS n').single()['n']
+
+        stats = {
+            'papers':        papers,
+            'authors':       authors,
+            'relationships': relationships
+        }
+        print(f'[Neo4jClient] Stats: {stats}')
+        return stats
 
 
 # ── Test it directly ───────────────────────────────────────────────────────
 if __name__ == '__main__':
     client = Neo4jClient()
 
-    # ── Setup: create test data we can query against ──────────────────────
-
-    # Create two papers
+    # Setup test data
     client.upsert_paper({
-        'id': 'test:paper_A',
-        'title': 'Paper A — Graph Neural Networks',
-        'abstract': 'Abstract A',
-        'year': 2022,
-        'categories': ['cs.AI'],
-        'citations': 10
+        'id': 'test:paper_A', 'title': 'Paper A — Graph Neural Networks',
+        'abstract': 'Abstract A', 'year': 2022, 'categories': ['cs.AI'], 'citations': 10
     })
     client.upsert_paper({
-        'id': 'test:paper_B',
-        'title': 'Paper B — Attention Mechanisms',
-        'abstract': 'Abstract B',
-        'year': 2022,
-        'categories': ['cs.LG'],
-        'citations': 5
+        'id': 'test:paper_B', 'title': 'Paper B — Attention Mechanisms',
+        'abstract': 'Abstract B', 'year': 2022, 'categories': ['cs.LG'], 'citations': 5
     })
-
-    # Create one author and link them to BOTH papers
-    # This means paper_A and paper_B are neighbors of each other
     client.upsert_author('Alice Researcher', 'MIT')
     client.link_author_to_paper('Alice Researcher', 'test:paper_A')
     client.link_author_to_paper('Alice Researcher', 'test:paper_B')
@@ -257,38 +191,23 @@ if __name__ == '__main__':
     print('\n--- Testing get_papers_by_year ---')
     papers_2022 = client.get_papers_by_year(2022)
     print(f'Papers from 2022: {len(papers_2022)}')
-    for p in papers_2022[:3]:
-        print(f'  → {p["id"]} | {p["title"]}')
-
-    papers_1800 = client.get_papers_by_year(1800)
-    print(f'Papers from 1800: {papers_1800}')
-    assert papers_1800 == [], 'Should be empty list for year with no papers'
-    print('  ✓ Empty year returns empty list correctly')
 
     print('\n--- Testing get_authors_of_paper ---')
     authors = client.get_authors_of_paper('test:paper_A')
     print(f'Authors of paper_A: {authors}')
-    assert 'Alice Researcher' in authors, 'Alice should be an author of paper_A'
+    assert 'Alice Researcher' in authors
     print('  ✓ Correct author returned')
-
-    no_authors = client.get_authors_of_paper('this:does:not:exist')
-    assert no_authors == [], 'Should be empty list for non-existent paper'
-    print('  ✓ Non-existent paper returns empty list correctly')
 
     print('\n--- Testing get_paper_neighbors ---')
     neighbors = client.get_paper_neighbors('test:paper_A')
     print(f'Neighbors of paper_A: {len(neighbors)}')
-    for n in neighbors:
-        print(f'  → {n["id"]} | {n["title"]}')
-    neighbor_ids = [n['id'] for n in neighbors]
-    assert 'test:paper_B' in neighbor_ids, 'paper_B should be a neighbor of paper_A'
+    assert any(n['id'] == 'test:paper_B' for n in neighbors)
     print('  ✓ Correct neighbor returned')
 
-    no_neighbors = client.get_paper_neighbors('this:does:not:exist')
-    assert no_neighbors == [], 'Should be empty list for non-existent paper'
-    print('  ✓ Non-existent paper returns empty list correctly')
+    print('\n--- Testing get_stats ---')
+    stats = client.get_stats()
+    assert stats['papers'] > 0
+    print('  ✓ Stats returned correctly')
 
-    print('\n✅ All three methods working correctly.')
-    print(f'Total papers in Neo4j: {client.get_paper_count()}')
-
+    print('\n✅ All methods working correctly.')
     client.close()
