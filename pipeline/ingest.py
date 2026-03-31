@@ -81,5 +81,5 @@ async def ingest_papers(queries: list[str], per_query: int = 100) -> dict:
 
 if __name__ == '__main__':
     # Start with 2 queries and 100 papers each to verify everything works
-    test_queries = APEX_QUERIES[:5]
+    test_queries = APEX_QUERIES[:10]
     asyncio.run(ingest_papers(test_queries, per_query=100))
