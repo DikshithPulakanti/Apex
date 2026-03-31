@@ -154,6 +154,39 @@ class Neo4jClient:
                 neighbors.append(dict(record['neighbor']))
         print(f'[Neo4jClient] get_paper_neighbors("{paper_id}") → {len(neighbors)} neighbor(s) found.')
         return neighbors
+    
+    def upsert_concept(self, name: str, domain: str = '') -> None:
+        """Insert or update a Concept node."""
+        query = """
+            MERGE (c:Concept {name: $name})
+            SET c.domain = $domain
+        """
+        with self.driver.session() as session:
+            session.run(query, name=name, domain=domain)
+
+    def link_paper_to_concept(self, paper_id: str, concept_name: str) -> None:
+        """Create MENTIONS relationship between Paper and Concept."""
+        query = """
+            MATCH (p:Paper   {id:   $paper_id})
+            MATCH (c:Concept {name: $concept_name})
+            MERGE (p)-[:MENTIONS]->(c)
+        """
+        with self.driver.session() as session:
+            session.run(query, paper_id=paper_id, concept_name=concept_name)
+
+    def get_concepts_for_paper(self, paper_id: str) -> list[str]:
+        """Return all concept names mentioned by a given paper."""
+        query = """
+            MATCH (p:Paper {id: $paper_id})-[:MENTIONS]->(c:Concept)
+            RETURN c.name AS name
+            ORDER BY c.name
+        """
+        concepts = []
+        with self.driver.session() as session:
+            result = session.run(query, paper_id=paper_id)
+            for record in result:
+                concepts.append(record['name'])
+        return concepts
 
     def get_stats(self) -> dict:
         """Returns counts of all node types and relationships in the graph."""
