@@ -93,7 +93,7 @@ class Neo4jClient:
             result = session.run('MATCH (p:Paper) RETURN count(p) AS n')
             return result.single()['n']
 
-    def batch_upsert_papers(self, papers: list[dict]) -> int:
+    def batch_upsert_papers(self, papers: list) -> int:
         """Efficiently insert many papers using UNWIND."""
         query = """
             UNWIND $papers AS paper
@@ -109,7 +109,7 @@ class Neo4jClient:
 
     # ── Read methods ──────────────────────────────────────────────────────
 
-    def get_papers_by_year(self, year: int) -> list[dict]:
+    def get_papers_by_year(self, year: int) -> list:
         """Return all papers published in a given year."""
         query = """
             MATCH (p:Paper {year: $year})
@@ -124,7 +124,7 @@ class Neo4jClient:
         print(f'[Neo4jClient] get_papers_by_year({year}) → {len(papers)} papers found.')
         return papers
 
-    def get_authors_of_paper(self, paper_id: str) -> list[str]:
+    def get_authors_of_paper(self, paper_id: str) -> list:
         """Return the names of all authors who wrote a given paper."""
         query = """
             MATCH (p:Paper {id: $paper_id})-[:AUTHORED_BY]->(a:Author)
@@ -139,7 +139,7 @@ class Neo4jClient:
         print(f'[Neo4jClient] get_authors_of_paper("{paper_id}") → {len(authors)} author(s) found.')
         return authors
 
-    def get_paper_neighbors(self, paper_id: str) -> list[dict]:
+    def get_paper_neighbors(self, paper_id: str) -> list:
         """Return all papers that share at least one author with this paper."""
         query = """
             MATCH (p:Paper {id: $paper_id})-[:AUTHORED_BY]->(a:Author)<-[:AUTHORED_BY]-(neighbor:Paper)
@@ -154,7 +154,9 @@ class Neo4jClient:
                 neighbors.append(dict(record['neighbor']))
         print(f'[Neo4jClient] get_paper_neighbors("{paper_id}") → {len(neighbors)} neighbor(s) found.')
         return neighbors
-    
+
+    # ── Concept operations ────────────────────────────────────────────────
+
     def upsert_concept(self, name: str, domain: str = '') -> None:
         """Insert or update a Concept node."""
         query = """
@@ -174,7 +176,7 @@ class Neo4jClient:
         with self.driver.session() as session:
             session.run(query, paper_id=paper_id, concept_name=concept_name)
 
-    def get_concepts_for_paper(self, paper_id: str) -> list[str]:
+    def get_concepts_for_paper(self, paper_id: str) -> list:
         """Return all concept names mentioned by a given paper."""
         query = """
             MATCH (p:Paper {id: $paper_id})-[:MENTIONS]->(c:Concept)
@@ -187,6 +189,35 @@ class Neo4jClient:
             for record in result:
                 concepts.append(record['name'])
         return concepts
+
+    # ── Embedding operations ──────────────────────────────────────────────
+
+    def get_papers_without_embeddings(self, limit: int = 100) -> list:
+        """Returns papers that don't have an embedding yet."""
+        query = """
+            MATCH (p:Paper)
+            WHERE p.embedding IS NULL
+            RETURN p
+            LIMIT $limit
+        """
+        papers = []
+        with self.driver.session() as session:
+            result = session.run(query, limit=limit)
+            for record in result:
+                papers.append(dict(record['p']))
+        print(f'[Neo4jClient] Found {len(papers)} papers without embeddings.')
+        return papers
+
+    def set_paper_embedding(self, paper_id: str, embedding: list) -> None:
+        """Stores an embedding vector on a Paper node."""
+        query = """
+            MATCH (p:Paper {id: $paper_id})
+            SET p.embedding = $embedding
+        """
+        with self.driver.session() as session:
+            session.run(query, paper_id=paper_id, embedding=embedding)
+
+    # ── Stats ─────────────────────────────────────────────────────────────
 
     def get_stats(self) -> dict:
         """Returns counts of all node types and relationships in the graph."""
@@ -208,7 +239,6 @@ class Neo4jClient:
 if __name__ == '__main__':
     client = Neo4jClient()
 
-    # Setup test data
     client.upsert_paper({
         'id': 'test:paper_A', 'title': 'Paper A — Graph Neural Networks',
         'abstract': 'Abstract A', 'year': 2022, 'categories': ['cs.AI'], 'citations': 10
@@ -227,13 +257,11 @@ if __name__ == '__main__':
 
     print('\n--- Testing get_authors_of_paper ---')
     authors = client.get_authors_of_paper('test:paper_A')
-    print(f'Authors of paper_A: {authors}')
     assert 'Alice Researcher' in authors
     print('  ✓ Correct author returned')
 
     print('\n--- Testing get_paper_neighbors ---')
     neighbors = client.get_paper_neighbors('test:paper_A')
-    print(f'Neighbors of paper_A: {len(neighbors)}')
     assert any(n['id'] == 'test:paper_B' for n in neighbors)
     print('  ✓ Correct neighbor returned')
 
