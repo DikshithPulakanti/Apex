@@ -242,42 +242,53 @@ class Neo4jClient:
         print(f'[Neo4jClient] Built {total} concept co-occurrence relationships.')
         return total
     
-    def find_research_gaps(self, min_gap_score: float = 0.1, limit: int = 20) -> list:
+    def find_research_gaps(self, min_pagerank: float = 0.5,
+                           limit: int = 20) -> list:
         """
-        Finds potential research gaps — concept pairs that are both
-        important but rarely connected.
+        Finds research gaps using GDS scores.
 
         ALGORITHM:
-        1. Find concept pairs from different papers
-        2. Both concepts must appear in multiple papers (important)
+        1. Find concept pairs from DIFFERENT communities (cross-domain)
+        2. Both concepts must have meaningful PageRank (important)
         3. They must rarely co-occur (unexplored connection)
-        4. Gap score = (paper_count_1 * paper_count_2) / (co_occurrence + 1)
-           High score = both important, rarely connected = research gap
+        4. Gap score = (pagerank_1 * pagerank_2) / (co_occurrence + 1)
+
+        Cross-domain gaps are the most interesting — they represent
+        connections between research areas that haven't been explored yet.
+
+        PARAMETERS:
+            min_pagerank : minimum pagerank for both concepts
+            limit        : how many gaps to return
 
         RETURNS:
-            list of dicts with concept pairs and gap scores
+            list of dicts with concept pairs, communities, and gap scores
         """
         query = """
-            MATCH (c1:Concept)<-[:MENTIONS]-(p1:Paper)
-            WITH c1, count(p1) AS count1
-            WHERE count1 >= 2
+            MATCH (c1:Concept)
+            WHERE c1.pagerank >= $min_pagerank
+            AND c1.community IS NOT NULL
 
-            MATCH (c2:Concept)<-[:MENTIONS]-(p2:Paper)
-            WITH c1, count1, c2, count(p2) AS count2
-            WHERE count2 >= 2 AND c1 <> c2 AND c1.name < c2.name
+            MATCH (c2:Concept)
+            WHERE c2.pagerank >= $min_pagerank
+            AND c2.community IS NOT NULL
+            AND c1 <> c2
+            AND c1.community <> c2.community
+            AND c1.name < c2.name
 
             OPTIONAL MATCH (c1)-[r:CO_OCCURS_WITH]-(c2)
-            WITH c1, c2, count1, count2,
+            WITH c1, c2,
                  coalesce(r.weight, 0) AS co_occurrence
 
-            WITH c1, c2, count1, count2, co_occurrence,
-                 toFloat(count1 * count2) / (co_occurrence + 1) AS gap_score
+            WITH c1, c2, co_occurrence,
+                 (c1.pagerank * c2.pagerank) / (co_occurrence + 1)
+                 AS gap_score
 
-            WHERE gap_score >= $min_gap_score
-
-            RETURN c1.name AS concept1,
-                   c2.name AS concept2,
-                   count1, count2,
+            RETURN c1.name        AS concept1,
+                   c2.name        AS concept2,
+                   c1.community   AS community1,
+                   c2.community   AS community2,
+                   c1.pagerank    AS pagerank1,
+                   c2.pagerank    AS pagerank2,
                    co_occurrence,
                    gap_score
             ORDER BY gap_score DESC
@@ -286,8 +297,8 @@ class Neo4jClient:
         gaps = []
         with self.driver.session() as session:
             result = session.run(query,
-                min_gap_score=min_gap_score,
-                limit=limit)
+                min_pagerank = min_pagerank,
+                limit        = limit)
             for record in result:
                 gaps.append(dict(record))
 
