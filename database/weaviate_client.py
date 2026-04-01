@@ -34,8 +34,6 @@ class WeaviateClient:
     def _create_collection(self):
         """
         Creates the Paper collection in Weaviate if it doesn't exist.
-        A collection is like a table — it defines what properties
-        each object has.
         """
         if self.client.collections.exists(self.COLLECTION_NAME):
             print(f'[WeaviateClient] Collection "{self.COLLECTION_NAME}" already exists.')
@@ -56,9 +54,7 @@ class WeaviateClient:
 
     def upsert_paper(self, paper_id: str, title: str, abstract: str,
                      year: int, categories: list, embedding: list) -> None:
-        """
-        Inserts or updates a paper in Weaviate with its embedding vector.
-        """
+        """Inserts a paper in Weaviate with its embedding vector."""
         collection = self.client.collections.get(self.COLLECTION_NAME)
         collection.data.insert(
             properties = {
@@ -73,10 +69,10 @@ class WeaviateClient:
 
     def upsert_papers_batch(self, papers: list) -> int:
         """
-        Inserts many papers at once. Much faster than one by one.
+        Inserts many papers at once.
 
         PARAMETERS:
-            papers: list of dicts, each with:
+            papers: list of dicts with:
                     paper_id, title, abstract, year, categories, embedding
         RETURNS:
             number of papers inserted
@@ -103,19 +99,12 @@ class WeaviateClient:
         """
         Finds papers most similar to the query vector.
         Pure semantic search — meaning based, not keyword based.
-
-        PARAMETERS:
-            query_vector : 384-dim embedding of your query text
-            limit        : how many results to return
-
-        RETURNS:
-            list of dicts with paper properties + similarity score
         """
         collection = self.client.collections.get(self.COLLECTION_NAME)
         results    = collection.query.near_vector(
-            near_vector       = query_vector,
-            limit             = limit,
-            return_metadata   = wvc.query.MetadataQuery(distance=True)
+            near_vector     = query_vector,
+            limit           = limit,
+            return_metadata = wvc.query.MetadataQuery(distance=True)
         )
 
         papers = []
@@ -131,25 +120,16 @@ class WeaviateClient:
         """
         Combines vector search + keyword search.
 
-        alpha=1.0 → pure vector search (semantic)
-        alpha=0.0 → pure keyword search (BM25)
-        alpha=0.5 → equal mix of both
-
-        PARAMETERS:
-            query_text   : the search query as text (for keyword matching)
-            query_vector : the search query as vector (for semantic matching)
-            limit        : how many results to return
-            alpha        : balance between vector and keyword search
-
-        RETURNS:
-            list of paper dicts with relevance scores
+        alpha=1.0 → pure vector search
+        alpha=0.0 → pure keyword search
+        alpha=0.5 → equal mix
         """
         collection = self.client.collections.get(self.COLLECTION_NAME)
         results    = collection.query.hybrid(
-            query        = query_text,
-            vector       = query_vector,
-            limit        = limit,
-            alpha        = alpha,
+            query           = query_text,
+            vector          = query_vector,
+            limit           = limit,
+            alpha           = alpha,
             return_metadata = wvc.query.MetadataQuery(score=True)
         )
 
@@ -167,6 +147,13 @@ class WeaviateClient:
         result     = collection.aggregate.over_all(total_count=True)
         return result.total_count
 
+    def delete_collection(self) -> None:
+        """Deletes and recreates the Paper collection. Use to clear all data."""
+        if self.client.collections.exists(self.COLLECTION_NAME):
+            self.client.collections.delete(self.COLLECTION_NAME)
+            print(f'[WeaviateClient] Collection "{self.COLLECTION_NAME}" deleted.')
+        self._create_collection()
+
     def close(self):
         self.client.close()
         print('[WeaviateClient] Connection closed.')
@@ -174,6 +161,9 @@ class WeaviateClient:
 
 # ── Test it directly ───────────────────────────────────────────────────────
 if __name__ == '__main__':
+    import sys
+    import os
+    sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     from embedder import Embedder
 
     client   = WeaviateClient()
