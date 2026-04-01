@@ -217,6 +217,83 @@ class Neo4jClient:
         with self.driver.session() as session:
             session.run(query, paper_id=paper_id, embedding=embedding)
 
+    def build_concept_cooccurrence(self) -> int:
+        """
+        Creates CO_OCCURS_WITH relationships between concepts
+        that appear in the same paper.
+
+        Two concepts co-occur if they are both mentioned by the same paper.
+        The weight property counts how many papers they share.
+
+        RETURNS:
+            number of co-occurrence relationships created
+        """
+        query = """
+            MATCH (c1:Concept)<-[:MENTIONS]-(p:Paper)-[:MENTIONS]->(c2:Concept)
+            WHERE c1 <> c2 AND id(c1) < id(c2)
+            WITH c1, c2, count(p) AS weight
+            MERGE (c1)-[r:CO_OCCURS_WITH]-(c2)
+            SET r.weight = weight
+            RETURN count(r) AS total
+        """
+        with self.driver.session() as session:
+            result = session.run(query)
+            total  = result.single()['total']
+        print(f'[Neo4jClient] Built {total} concept co-occurrence relationships.')
+        return total
+    
+    def find_research_gaps(self, min_gap_score: float = 0.1, limit: int = 20) -> list:
+        """
+        Finds potential research gaps — concept pairs that are both
+        important but rarely connected.
+
+        ALGORITHM:
+        1. Find concept pairs from different papers
+        2. Both concepts must appear in multiple papers (important)
+        3. They must rarely co-occur (unexplored connection)
+        4. Gap score = (paper_count_1 * paper_count_2) / (co_occurrence + 1)
+           High score = both important, rarely connected = research gap
+
+        RETURNS:
+            list of dicts with concept pairs and gap scores
+        """
+        query = """
+            MATCH (c1:Concept)<-[:MENTIONS]-(p1:Paper)
+            WITH c1, count(p1) AS count1
+            WHERE count1 >= 2
+
+            MATCH (c2:Concept)<-[:MENTIONS]-(p2:Paper)
+            WITH c1, count1, c2, count(p2) AS count2
+            WHERE count2 >= 2 AND c1 <> c2 AND c1.name < c2.name
+
+            OPTIONAL MATCH (c1)-[r:CO_OCCURS_WITH]-(c2)
+            WITH c1, c2, count1, count2,
+                 coalesce(r.weight, 0) AS co_occurrence
+
+            WITH c1, c2, count1, count2, co_occurrence,
+                 toFloat(count1 * count2) / (co_occurrence + 1) AS gap_score
+
+            WHERE gap_score >= $min_gap_score
+
+            RETURN c1.name AS concept1,
+                   c2.name AS concept2,
+                   count1, count2,
+                   co_occurrence,
+                   gap_score
+            ORDER BY gap_score DESC
+            LIMIT $limit
+        """
+        gaps = []
+        with self.driver.session() as session:
+            result = session.run(query,
+                min_gap_score=min_gap_score,
+                limit=limit)
+            for record in result:
+                gaps.append(dict(record))
+
+        print(f'[Neo4jClient] Found {len(gaps)} research gaps.')
+        return gaps
+
     # ── Stats ─────────────────────────────────────────────────────────────
 
     def get_stats(self) -> dict:

@@ -28,11 +28,28 @@ class ConceptExtractor:
 
         # Words to filter out — too common, not technical
         self.stop_concepts = {
+            # Generic paper language
             'paper', 'method', 'approach', 'result', 'model', 'system',
             'work', 'study', 'task', 'problem', 'data', 'dataset',
             'experiment', 'performance', 'training', 'learning', 'network',
             'neural network', 'deep learning', 'machine learning',
             'state of the art', 'sota', 'et al', 'fig', 'table',
+            # Pronouns and demonstratives
+            'this paper', 'this work', 'this approach', 'this method',
+            'this model', 'this study', 'this task', 'this framework',
+            'our method', 'our approach', 'our model', 'our work',
+            'the model', 'the method', 'the approach', 'the system',
+            'the task', 'the problem', 'the dataset', 'the network',
+            # Vague nouns
+            'the ability', 'the capability', 'the performance',
+            'the development', 'the process', 'the use', 'the need',
+            'the risks', 'the benefits', 'the challenge', 'the challenges',
+            'the results', 'the findings', 'the fact', 'the goal',
+            'a key', 'a novel', 'a new', 'a simple', 'a unified',
+            'this paradigm', 'this direction', 'this setting',
+            'existing methods', 'existing approaches', 'existing benchmarks',
+            'recent advances', 'recent work', 'prior work',
+            'various tasks', 'various methods', 'various applications',
         }
 
     def extract_concepts(self, text: str, max_concepts: int = 10) -> list:
