@@ -142,25 +142,23 @@ class ArxivScraper:
 
     async def scrape_all(self, queries: list[str], per_query: int = 500) -> list[Paper]:
         """
-        Scrape multiple queries concurrently.
+        Scrape multiple queries sequentially with delay to avoid rate limits.
         Returns deduplicated list of papers.
         """
         print(f'Starting scrape: {len(queries)} queries × {per_query} papers each')
 
-        # Run all queries concurrently
-        results = await asyncio.gather(*[
-            self.scrape_query(query, per_query)
-            for query in queries
-        ])
-
-        # Flatten and deduplicate by paper id
         seen = set()
         papers = []
-        for batch in results:
+
+        for i, query in enumerate(queries):
+            print(f'  [{i+1}/{len(queries)}] {query}')
+            batch = await self.scrape_query(query, per_query)
             for paper in batch:
                 if paper.id not in seen:
                     seen.add(paper.id)
                     papers.append(paper)
+            print(f'    → {len(batch)} papers ({len(papers)} unique total)')
+            await asyncio.sleep(10)  # 5 second gap between queries
 
         print(f'Scraped {len(papers)} unique papers')
         return papers
