@@ -1,6 +1,7 @@
 'use client'
 
 import { useEffect, useState } from 'react'
+import KnowledgeGraph from './graph'
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -168,6 +169,9 @@ export default function Dashboard() {
             </div>
           </section>
         )}
+
+        {/* Knowledge Graph Visualization */}
+        <KnowledgeGraph />
 
         {/* Two Column Layout */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
