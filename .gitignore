@@ -27,4 +27,8 @@ venv/
 # Virtual environment
 apex_env/
 
-apex_env311/
+apex_env311/training/model/model.safetensors
+mlruns/
+mlflow.db
+training/data/
+training/model/
