@@ -1,5 +1,6 @@
 # agents/skeptic.py
 # APEX Skeptic Agent — adversarially challenges hypotheses
+# Now with HypothesisValidityBERT for fast local scoring
 
 import sys
 import os
@@ -12,6 +13,7 @@ from langgraph.graph import StateGraph, END
 from dotenv import load_dotenv
 
 from database.neo4j_client import Neo4jClient
+from training.predictor import HypothesisPredictor
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
@@ -34,8 +36,9 @@ class SkepticState(TypedDict):
 
 def get_resources():
     return {
-        'neo4j':  Neo4jClient(),
-        'claude': anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY')),
+        'neo4j':     Neo4jClient(),
+        'claude':    anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY')),
+        'predictor': HypothesisPredictor(),
     }
 
 
@@ -169,24 +172,52 @@ Return ONLY a JSON object:
     elif '```' in text:
         text = text.split('```')[1].split('```')[0].strip()
 
-    data    = json.loads(text)
+    data     = json.loads(text)
     rebuttal = data.get('rebuttal', '')
 
     print(f'[Skeptic:generate_rebuttal] Rebuttal: {rebuttal[:100]}')
     return {'rebuttal': rebuttal, 'status': 'rebuttal generated'}
 
 
-# ── Node 4: Score Debate ──────────────────────────────────────────────────
+# ── Node 4: Score Debate (BERT + Claude fallback) ─────────────────────────
 
 def score_debate(state: SkepticState, resources: dict) -> dict:
     """
-    Claude plays the Judge — scores the debate and determines verdict.
+    Two-stage scoring:
+    1. HypothesisValidityBERT (instant, free)
+    2. Claude Judge (only if BERT is uncertain)
     """
     print(f'\n[Skeptic:score_debate] Scoring debate...')
 
-    h      = state['hypothesis']
-    claude = resources['claude']
+    h         = state['hypothesis']
+    predictor = resources['predictor']
+    statement = h.get('statement', '')
 
+    # ── Stage 1: BERT fast-pass ──────────────────────────────────────
+    bert_result = predictor.predict(statement)
+    confidence  = bert_result['confidence']
+    verdict_bert = bert_result['verdict']
+
+    print(f'[Skeptic:score_debate] BERT → {verdict_bert} (confidence: {confidence})')
+
+    if confidence >= 0.95:
+        # High confidence — trust BERT, skip Claude
+        debate_score = confidence if verdict_bert == 'valid' else (1 - confidence)
+        verdict = 'approved' if verdict_bert == 'valid' else 'rejected'
+
+        print(f'[Skeptic:score_debate] BERT confident enough — skipping Claude')
+        print(f'[Skeptic:score_debate] Score: {debate_score:.4f} | Verdict: {verdict}')
+
+        return {
+            'debate_score': round(debate_score, 4),
+            'verdict':      verdict,
+            'status':       f'debate scored (BERT): {verdict} ({debate_score:.4f})'
+        }
+
+    # ── Stage 2: Claude Judge (BERT uncertain) ───────────────────────
+    print(f'[Skeptic:score_debate] BERT uncertain — calling Claude Judge...')
+
+    claude = resources['claude']
     counterargs_text = '\n'.join([
         f'{i+1}. {c}'
         for i, c in enumerate(state['counterarguments'])
@@ -194,7 +225,7 @@ def score_debate(state: SkepticState, resources: dict) -> dict:
 
     prompt = f"""You are an impartial scientific judge scoring a debate.
 
-Hypothesis: {h.get('statement', '')}
+Hypothesis: {statement}
 
 Counterarguments:
 {counterargs_text}
@@ -229,20 +260,20 @@ Return ONLY a JSON object:
     debate_score = float(data.get('score', 0.5))
     verdict      = data.get('verdict', 'rejected')
 
-    print(f'[Skeptic:score_debate] Score: {debate_score} | Verdict: {verdict}')
+    print(f'[Skeptic:score_debate] Claude → Score: {debate_score} | Verdict: {verdict}')
     print(f'  Reasoning: {data.get("reasoning", "")[:100]}')
 
     return {
         'debate_score': debate_score,
         'verdict':      verdict,
-        'status':       f'debate scored: {verdict} ({debate_score})'
+        'status':       f'debate scored (Claude): {verdict} ({debate_score})'
     }
 
 
-# ── Node 5: Update Neo4j ──────────────────────────────────────────────────
+# ── Node 5: Update Hypothesis Status ─────────────────────────────────────
 
 def update_hypothesis_status(state: SkepticState, resources: dict) -> dict:
-    """Updates the hypothesis status in Neo4j based on debate outcome."""
+    """Update hypothesis status in Neo4j based on debate outcome."""
     print(f'\n[Skeptic:update_hypothesis_status] Updating Neo4j...')
 
     neo4j  = resources['neo4j']
@@ -255,9 +286,9 @@ def update_hypothesis_status(state: SkepticState, resources: dict) -> dict:
                 h.debate_score = $score,
                 h.rebuttal     = $rebuttal
         """,
-            id      = state['hypothesis_id'],
-            status  = status,
-            score   = state['debate_score'],
+            id       = state['hypothesis_id'],
+            status   = status,
+            score    = state['debate_score'],
             rebuttal = state['rebuttal']
         )
 
@@ -285,7 +316,7 @@ def build_skeptic(resources: dict):
 
     graph = StateGraph(SkepticState)
 
-    graph.add_node('load_hypothesis',          node_load)
+    graph.add_node('load_hypothesis',           node_load)
     graph.add_node('generate_counterarguments', node_counter)
     graph.add_node('generate_rebuttal',         node_rebuttal)
     graph.add_node('score_debate',              node_score)
