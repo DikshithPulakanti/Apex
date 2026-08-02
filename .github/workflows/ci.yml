@@ -55,17 +55,47 @@ jobs:
       - name: Download spaCy model
         run: python -m spacy download en_core_web_lg
 
+      - name: Create CI env file
+        # docker-compose.yml has services (app, the 4 MCP servers) that
+        # reference env_file: .env — .env is gitignored (it holds real
+        # secrets), so it doesn't exist on a fresh checkout. Any `docker
+        # compose` invocation parses the *whole* file, including services
+        # we never start here, so even `down` fails without this.
+        run: |
+          cat > .env <<'EOF'
+          NEO4J_URI=bolt://localhost:7688
+          NEO4J_USER=neo4j
+          NEO4J_PASSWORD=apexpassword
+          POSTGRES_HOST=localhost
+          POSTGRES_PORT=5435
+          POSTGRES_DB=apex_db
+          POSTGRES_USER=apex
+          POSTGRES_PASSWORD=apexpassword
+          WEAVIATE_HOST=localhost
+          WEAVIATE_PORT=8081
+          REDIS_HOST=localhost
+          REDIS_PORT=6381
+          ANTHROPIC_API_KEY=ci-placeholder-not-a-real-key
+          EOF
+
       - name: Start infrastructure
         run: docker compose up -d neo4j redis weaviate
 
       - name: Wait for infrastructure to be healthy
         run: |
           echo "Waiting for Neo4j..."
-          timeout 120 bash -c 'until docker compose exec -T neo4j cypher-shell -u neo4j -p apexpassword "RETURN 1" >/dev/null 2>&1; do sleep 3; done'
+          # Generous timeout: a fresh CI run downloads the GDS plugin from
+          # the internet and does a genuine cold first boot every time,
+          # unlike local dev where the volume (and plugin) usually persist.
+          timeout 300 bash -c 'until docker compose exec -T neo4j cypher-shell -u neo4j -p apexpassword "RETURN 1" >/dev/null 2>&1; do sleep 5; done'
           echo "Waiting for Weaviate..."
-          timeout 60 bash -c 'until curl -sf http://localhost:8080/v1/.well-known/ready >/dev/null 2>&1; do sleep 3; done'
+          timeout 60 bash -c 'until curl -sf http://localhost:8081/v1/.well-known/ready >/dev/null 2>&1; do sleep 3; done'
           echo "Waiting for Redis..."
           timeout 30 bash -c 'until docker compose exec -T redis redis-cli ping >/dev/null 2>&1; do sleep 2; done'
+
+      - name: Dump infrastructure logs on failure
+        if: failure()
+        run: docker compose logs --tail=200 neo4j weaviate redis
 
       - name: Run integration tests
         run: pytest -m integration
