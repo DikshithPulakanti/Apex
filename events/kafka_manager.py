@@ -6,12 +6,15 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import json
+import os
 import time
 import uuid
 from datetime import datetime, timezone
 from kafka import KafkaProducer, KafkaConsumer
 from kafka.admin import KafkaAdminClient, NewTopic
 from kafka.errors import TopicAlreadyExistsError
+
+DEFAULT_BOOTSTRAP_SERVERS = os.getenv('KAFKA_BOOTSTRAP_SERVERS', 'localhost:9092')
 
 
 # ── APEX Event Topics ────────────────────────────────────────────────────
@@ -28,7 +31,7 @@ TOPICS = [
 
 # ── Topic Setup ──────────────────────────────────────────────────────────
 
-def create_topics(bootstrap_servers='localhost:9092'):
+def create_topics(bootstrap_servers=DEFAULT_BOOTSTRAP_SERVERS):
     """Create all APEX Kafka topics if they don't exist."""
     admin = KafkaAdminClient(bootstrap_servers=bootstrap_servers)
 
@@ -62,7 +65,7 @@ class EventPublisher:
     - data: the actual payload
     """
 
-    def __init__(self, bootstrap_servers='localhost:9092'):
+    def __init__(self, bootstrap_servers=DEFAULT_BOOTSTRAP_SERVERS):
         self.producer = KafkaProducer(
             bootstrap_servers=bootstrap_servers,
             value_serializer=lambda v: json.dumps(v).encode('utf-8'),
@@ -97,7 +100,7 @@ class EventSubscriber:
     Subscribes to Kafka topics and processes events with a callback.
     """
 
-    def __init__(self, topics: list, group_id: str, bootstrap_servers='localhost:9092'):
+    def __init__(self, topics: list, group_id: str, bootstrap_servers=DEFAULT_BOOTSTRAP_SERVERS):
         self.consumer = KafkaConsumer(
             *topics,
             bootstrap_servers=bootstrap_servers,

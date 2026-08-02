@@ -65,12 +65,12 @@ testability = how easily this could be tested (0 = impossible, 1 = straightforwa
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5",
             max_tokens=4000,
             messages=[{"role": "user", "content": prompt}]
         )
 
-        text = response.content[0].text.strip()
+        text = next((b.text for b in response.content if b.type == 'text'), '').strip()
         # Clean potential markdown fences
         text = text.replace("```json", "").replace("```", "").strip()
         hypotheses = json.loads(text)
@@ -117,12 +117,12 @@ testability = how easily this could ACTUALLY be tested (should be low for these 
 
     try:
         response = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-5",
             max_tokens=4000,
             messages=[{"role": "user", "content": prompt}]
         )
 
-        text = response.content[0].text.strip()
+        text = next((b.text for b in response.content if b.type == 'text'), '').strip()
         text = text.replace("```json", "").replace("```", "").strip()
         hypotheses = json.loads(text)
 

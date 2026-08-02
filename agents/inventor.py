@@ -13,6 +13,7 @@ from langgraph.graph import StateGraph, END
 from dotenv import load_dotenv
 
 from database.neo4j_client import Neo4jClient
+from events.node_tracing import node_tracer
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
@@ -180,12 +181,12 @@ Return ONLY a JSON object:
 }}"""
 
     message = claude.messages.create(
-        model      = 'claude-sonnet-4-20250514',
-        max_tokens = 800,
+        model      = 'claude-sonnet-5',
+        max_tokens = 3000,
         messages   = [{'role': 'user', 'content': prompt}]
     )
 
-    text = message.content[0].text.strip()
+    text = next((b.text for b in message.content if b.type == 'text'), '').strip()
     if '```json' in text:
         text = text.split('```json')[1].split('```')[0].strip()
     elif '```' in text:
@@ -258,12 +259,13 @@ def build_inventor(resources: dict):
         return skip_patent(state, resources)
 
     graph = StateGraph(InventorState)
+    trace = node_tracer('inventor')
 
-    graph.add_node('check_novelty',  node_novelty)
-    graph.add_node('run_simulation', node_sim)
-    graph.add_node('draft_patent',   node_draft)
-    graph.add_node('store_patent',   node_store)
-    graph.add_node('skip_patent',    node_skip)
+    trace(graph, 'check_novelty',  node_novelty, watch=['status', 'novelty_score', 'error'])
+    trace(graph, 'run_simulation', node_sim,     watch=['status'])
+    trace(graph, 'draft_patent',   node_draft,   watch=['status'])
+    trace(graph, 'store_patent',   node_store,   watch=['status', 'patent_id'])
+    trace(graph, 'skip_patent',    node_skip,    watch=['status'])
 
     graph.add_edge('check_novelty', 'run_simulation')
     graph.add_conditional_edges(

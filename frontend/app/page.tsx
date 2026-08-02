@@ -145,9 +145,14 @@ export default function Dashboard() {
               Autonomous Patent-Level Engineering Exchange
             </p>
           </div>
-          <div className="flex items-center gap-2">
-            <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
-            <span className="text-gray-400 text-sm">Live</span>
+          <div className="flex items-center gap-4">
+            <a href="/review" className="text-sm text-cyan-400 hover:underline">
+              Review Queue →
+            </a>
+            <div className="flex items-center gap-2">
+              <div className="w-2 h-2 rounded-full bg-green-400 animate-pulse" />
+              <span className="text-gray-400 text-sm">Live</span>
+            </div>
           </div>
         </div>
       </header>

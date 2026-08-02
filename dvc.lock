@@ -1,0 +1,14 @@
+schema: '2.0'
+stages:
+  export_corpus_snapshot:
+    cmd: python pipeline/export_corpus_snapshot.py
+    deps:
+    - path: pipeline/export_corpus_snapshot.py
+      hash: md5
+      md5: 1e6379a9f7d6643fc691294b441c11b9
+      size: 1419
+    outs:
+    - path: data/exports/papers_snapshot.jsonl
+      hash: md5
+      md5: e7519caa6b0d6e292ef442ba2d425f82
+      size: 2349924

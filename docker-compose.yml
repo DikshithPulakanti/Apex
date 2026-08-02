@@ -15,11 +15,19 @@ services:
   neo4j:
     image: neo4j:5.15
     ports:
-      - '7474:7474'
-      - '7687:7687'
+      # Host ports shifted off the 7474/7687 defaults — this machine already
+      # runs another project's Neo4j on those.
+      - '7475:7474'
+      - '7688:7687'
     environment:
       NEO4J_AUTH: neo4j/apexpassword
       NEO4J_PLUGINS: '["graph-data-science"]'
+      # Defaults were too tight for find_research_gaps' cross-join over the
+      # full concept graph — it hit dbms.memory.transaction.total.max mid-query.
+      NEO4J_server_memory_heap_initial__size: 1G
+      NEO4J_server_memory_heap_max__size: 2G
+      NEO4J_server_memory_pagecache_size: 1G
+      NEO4J_dbms_memory_transaction_total_max: 2G
     volumes:
       - neo4j_data:/data
     healthcheck:
@@ -33,7 +41,8 @@ services:
   postgres:
     image: postgres:15
     ports:
-      - '5434:5432'
+      # 5434 is already taken by another project's Postgres on this machine.
+      - '5435:5432'
     environment:
       POSTGRES_USER: apex
       POSTGRES_PASSWORD: apexpassword
@@ -50,7 +59,8 @@ services:
   redis:
     image: redis:7-alpine
     ports:
-      - '6379:6379'
+      # 6379 and 6380 are both taken by other projects' Redis on this machine.
+      - '6381:6379'
     volumes:
       - redis_data:/data
 
@@ -58,7 +68,8 @@ services:
   weaviate:
     image: semitechnologies/weaviate:1.27.0
     ports:
-      - '8080:8080'
+      # 8080 is already taken by another project's service on this machine.
+      - '8081:8080'
       - '50051:50051'
     environment:
       QUERY_DEFAULTS_LIMIT: 25
@@ -85,11 +96,16 @@ services:
   kafka:
     image: confluentinc/cp-kafka:7.5.0
     ports:
-      - '9092:9092'
+      # 9092 is already taken by another project's Kafka on this machine —
+      # shift the broker itself to 9093 end-to-end (host and container both)
+      # rather than splitting host/container ports, which breaks Kafka's
+      # own advertised-listener handshake.
+      - '9093:9093'
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9093
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
       KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
     depends_on:
@@ -97,11 +113,105 @@ services:
     volumes:
       - kafka_data:/var/lib/kafka/data
     healthcheck:
-      test: ['CMD', 'kafka-topics', '--bootstrap-server', 'localhost:9092', '--list']
+      test: ['CMD', 'kafka-topics', '--bootstrap-server', 'localhost:9093', '--list']
       interval: 10s
       timeout: 10s
       retries: 10
       start_period: 30s
+
+  # ── MCP servers — each is its own independent, typed, network-reachable
+  # service, sharing one image (mcp_servers/Dockerfile) parameterized by
+  # MCP_SERVER_MODULE. See mcp_servers/_transport.py for the HTTP transport.
+
+  graph-mcp:
+    build:
+      context: .
+      dockerfile: mcp_servers/Dockerfile
+    env_file: .env
+    environment:
+      MCP_SERVER_MODULE: mcp_servers.graph_mcp
+      MCP_PORT: '8801'
+      # Override .env's host-mapped port — inside the compose network,
+      # "localhost" means this container, not the neo4j one. Reach it by
+      # service name on its internal (unmapped) port instead.
+      NEO4J_URI: bolt://neo4j:7687
+    ports:
+      - '8801:8801'
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request; urllib.request.urlopen('http://localhost:8801/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  paper-mcp:
+    build:
+      context: .
+      dockerfile: mcp_servers/Dockerfile
+    env_file: .env
+    environment:
+      MCP_SERVER_MODULE: mcp_servers.paper_mcp
+      MCP_PORT: '8802'
+      # Same reasoning as graph-mcp — reach sibling services by compose
+      # service name on their internal ports, not the host-mapped ones.
+      NEO4J_URI: bolt://neo4j:7687
+      WEAVIATE_HOST: weaviate
+      WEAVIATE_PORT: '8080'
+    ports:
+      - '8802:8802'
+    depends_on:
+      neo4j:
+        condition: service_healthy
+      weaviate:
+        condition: service_started
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request; urllib.request.urlopen('http://localhost:8802/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  sim-mcp:
+    build:
+      context: .
+      dockerfile: mcp_servers/Dockerfile
+    environment:
+      MCP_SERVER_MODULE: mcp_servers.sim_mcp
+      MCP_PORT: '8803'
+    env_file: .env
+    ports:
+      - '8803:8803'
+    # No DB dependency — sim-mcp is pure compute (Monte Carlo simulation).
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request; urllib.request.urlopen('http://localhost:8803/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+
+  patent-mcp:
+    build:
+      context: .
+      dockerfile: mcp_servers/Dockerfile
+    env_file: .env
+    environment:
+      MCP_SERVER_MODULE: mcp_servers.patent_mcp
+      MCP_PORT: '8804'
+      NEO4J_URI: bolt://neo4j:7687
+    ports:
+      - '8804:8804'
+    depends_on:
+      neo4j:
+        condition: service_healthy
+    healthcheck:
+      test: ['CMD', 'python', '-c', "import urllib.request; urllib.request.urlopen('http://localhost:8804/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
 
 # Named volumes
 volumes:

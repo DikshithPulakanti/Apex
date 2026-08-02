@@ -13,6 +13,7 @@ from database.neo4j_client import Neo4jClient
 from database.weaviate_client import WeaviateClient
 from database.embedder import Embedder
 from scrapers.concept_extractor import ConceptExtractor
+from events.node_tracing import node_tracer
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
@@ -206,11 +207,12 @@ def build_harvester(resources: dict):
         return update_status(state, resources)
 
     graph = StateGraph(HarvesterState)
+    trace = node_tracer('harvester')
 
-    graph.add_node('search_papers',    node_search)
-    graph.add_node('extract_concepts', node_extract)
-    graph.add_node('insert_to_graph',  node_insert)
-    graph.add_node('update_status',    node_status)
+    trace(graph, 'search_papers',    node_search,  watch=['status', 'error'])
+    trace(graph, 'extract_concepts', node_extract, watch=['status', 'error'])
+    trace(graph, 'insert_to_graph',  node_insert,  watch=['status', 'papers_processed', 'error'])
+    trace(graph, 'update_status',    node_status,  watch=['status'])
 
     graph.add_edge('search_papers',    'extract_concepts')
     graph.add_edge('extract_concepts', 'insert_to_graph')

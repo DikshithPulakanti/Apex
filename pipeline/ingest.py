@@ -11,6 +11,7 @@ from scrapers.queries import APEX_QUERIES
 from database.neo4j_client import Neo4jClient
 from database.postgres_client import PostgresClient
 from database.redis_client import RedisClient
+from events.agent_events import emit_papers_ingested
 
 
 async def ingest_papers(queries: list, per_query: int = 100) -> dict:
@@ -87,14 +88,21 @@ async def ingest_papers(queries: list, per_query: int = 100) -> dict:
 
         # ── Log to PostgreSQL ─────────────────────────────────────────────
         print(f'\nLogging to PostgreSQL...')
+        run_id = ''
         try:
             postgres = PostgresClient()
             topic    = ', '.join(queries[:3]) + ('...' if len(queries) > 3 else '')
-            postgres.log_pipeline_run(topic, len(new_papers))
+            run_id   = str(postgres.log_pipeline_run(topic, len(new_papers)))
             postgres.close()
             print(f'      Run logged to PostgreSQL.')
         except Exception as e:
             print(f'      PostgreSQL logging failed: {e}')
+
+        # ── Publish papers.ingested (non-fatal if Kafka is unavailable) ────
+        try:
+            emit_papers_ingested(count=len(new_papers), topics=queries, run_id=run_id)
+        except Exception as e:
+            print(f'      Kafka event publish failed: {e}')
 
         # ── Stats ─────────────────────────────────────────────────────────
         print(f'\n✅ Ingestion complete!')
@@ -109,4 +117,4 @@ async def ingest_papers(queries: list, per_query: int = 100) -> dict:
 
 if __name__ == '__main__':
     test_queries = APEX_QUERIES
-    asyncio.run(ingest_papers(test_queries, per_query=100))
+    asyncio.run(ingest_papers(test_queries, per_query=400))

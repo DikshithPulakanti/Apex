@@ -4,6 +4,7 @@
 import psycopg2
 from datetime import datetime
 import os
+from typing import Optional
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -45,16 +46,22 @@ class PostgresClient:
 
     def _create_tables(self):
         """
-        Creates the pipeline_runs table if it doesn't exist yet.
+        Creates the pipeline_runs and hypothesis_reviews tables if they
+        don't exist yet.
 
         The 'IF NOT EXISTS' means running this twice won't crash
         or create duplicates — same safe pattern as MERGE in Neo4j.
 
-        Column breakdown:
+        Column breakdown (pipeline_runs):
             id           — auto-incrementing number, primary key
             topic        — what was searched, e.g. 'cat:cs.AI'
             started_at   — when the pipeline run began
             papers_found — how many papers were ingested
+
+        Column breakdown (hypothesis_reviews):
+            This is APEX's human-review queue — hypotheses the Skeptic
+            couldn't confidently auto-decide land here with status
+            'pending' until a human approves/rejects them.
         """
         query = """
             CREATE TABLE IF NOT EXISTS pipeline_runs (
@@ -76,6 +83,128 @@ class PostgresClient:
 
         cursor.close()
         print('[PostgresClient] pipeline_runs table ready.')
+
+        review_query = """
+            CREATE TABLE IF NOT EXISTS hypothesis_reviews (
+                id                 SERIAL PRIMARY KEY,
+                hypothesis_id      TEXT UNIQUE NOT NULL,
+                statement_snapshot TEXT,
+                bert_confidence    FLOAT,
+                bert_verdict       TEXT,
+                claude_score       FLOAT,
+                claude_verdict     TEXT,
+                claude_reasoning   TEXT,
+                mlflow_run_id      TEXT,
+                status             TEXT NOT NULL DEFAULT 'pending',
+                created_at         TIMESTAMP NOT NULL DEFAULT now(),
+                decided_at         TIMESTAMP,
+                decided_by         TEXT,
+                decision_notes     TEXT
+            )
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(review_query)
+        self.conn.commit()
+        cursor.close()
+        print('[PostgresClient] hypothesis_reviews table ready.')
+
+    def enqueue_review(self, hypothesis_id: str, statement_snapshot: str,
+                        bert_confidence: float, bert_verdict: str,
+                        claude_score: float, claude_verdict: str,
+                        claude_reasoning: str, mlflow_run_id: str) -> int:
+        """
+        Flags a hypothesis for human review. Idempotent: re-running the
+        Skeptic on the same hypothesis just refreshes the existing pending
+        row instead of creating a duplicate.
+        """
+        query = """
+            INSERT INTO hypothesis_reviews
+                (hypothesis_id, statement_snapshot, bert_confidence, bert_verdict,
+                 claude_score, claude_verdict, claude_reasoning, mlflow_run_id, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+            ON CONFLICT (hypothesis_id) DO UPDATE SET
+                statement_snapshot = EXCLUDED.statement_snapshot,
+                bert_confidence    = EXCLUDED.bert_confidence,
+                bert_verdict       = EXCLUDED.bert_verdict,
+                claude_score       = EXCLUDED.claude_score,
+                claude_verdict     = EXCLUDED.claude_verdict,
+                claude_reasoning   = EXCLUDED.claude_reasoning,
+                mlflow_run_id      = EXCLUDED.mlflow_run_id,
+                status             = 'pending',
+                decided_at         = NULL,
+                decided_by         = NULL,
+                decision_notes     = NULL
+            RETURNING id
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(query, (
+            hypothesis_id, statement_snapshot, bert_confidence, bert_verdict,
+            claude_score, claude_verdict, claude_reasoning, mlflow_run_id,
+        ))
+        review_id = cursor.fetchone()[0]
+        self.conn.commit()
+        cursor.close()
+        print(f'[PostgresClient] Flagged {hypothesis_id} for human review (review #{review_id})')
+        return review_id
+
+    def get_pending_reviews(self) -> list:
+        """Returns every hypothesis currently awaiting human review, newest first."""
+        query = """
+            SELECT id, hypothesis_id, statement_snapshot, bert_confidence, bert_verdict,
+                   claude_score, claude_verdict, claude_reasoning, mlflow_run_id,
+                   status, created_at
+            FROM hypothesis_reviews
+            WHERE status = 'pending'
+            ORDER BY created_at DESC
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(query)
+        columns = [desc[0] for desc in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        cursor.close()
+        return rows
+
+    def get_review(self, hypothesis_id: str) -> Optional[dict]:
+        """Fetches one review row by hypothesis id, or None if it doesn't exist."""
+        query = """
+            SELECT id, hypothesis_id, statement_snapshot, bert_confidence, bert_verdict,
+                   claude_score, claude_verdict, claude_reasoning, mlflow_run_id,
+                   status, created_at, decided_at, decided_by, decision_notes
+            FROM hypothesis_reviews
+            WHERE hypothesis_id = %s
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(query, (hypothesis_id,))
+        row = cursor.fetchone()
+        if not row:
+            cursor.close()
+            return None
+        columns = [desc[0] for desc in cursor.description]
+        result = dict(zip(columns, row))
+        cursor.close()
+        return result
+
+    def decide_review(self, hypothesis_id: str, decision: str,
+                       decided_by: str = '', decision_notes: str = '') -> bool:
+        """
+        Records a human decision ('approved' or 'rejected') for a pending
+        review. Guarded by `WHERE status = 'pending'` so a double-click or
+        race between two reviewers is a harmless no-op, not a double-decide.
+
+        Returns True if a pending row was actually updated, False if there
+        was nothing pending to decide (already decided, or unknown id).
+        """
+        query = """
+            UPDATE hypothesis_reviews
+            SET status = %s, decided_at = now(), decided_by = %s, decision_notes = %s
+            WHERE hypothesis_id = %s AND status = 'pending'
+        """
+        cursor = self.conn.cursor()
+        cursor.execute(query, (decision, decided_by, decision_notes, hypothesis_id))
+        updated = cursor.rowcount > 0
+        self.conn.commit()
+        cursor.close()
+        return updated
 
     def log_pipeline_run(self, topic: str, papers_found: int) -> int:
         """

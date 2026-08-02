@@ -8,7 +8,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import asyncio
 import json
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp import types
 from dotenv import load_dotenv
 
@@ -17,6 +16,8 @@ load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file_
 from database.weaviate_client import WeaviateClient
 from database.embedder import Embedder
 from database.neo4j_client import Neo4jClient
+from mcp_servers._transport import run_server
+from mcp_servers.schemas import SearchPapersInput
 
 
 # ── Initialize server ─────────────────────────────────────────────────────
@@ -188,9 +189,14 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
 
 async def handle_search_papers(args: dict) -> list[types.TextContent]:
-    query   = args['query']
-    limit   = args.get('limit', 5)
-    alpha   = args.get('alpha', 0.7)
+    try:
+        validated = SearchPapersInput.model_validate(args)
+    except Exception as e:
+        return [types.TextContent(type='text', text=f'Invalid input: {e}')]
+
+    query   = validated.query
+    limit   = validated.limit
+    alpha   = validated.alpha
 
     embedder = get_embedder()
     weaviate = get_weaviate()
@@ -268,12 +274,7 @@ async def handle_get_papers_by_year(args: dict) -> list[types.TextContent]:
 
 async def main():
     print('[paper-mcp] Starting server...', file=sys.stderr)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+    await run_server(server, 'paper-mcp')
 
 
 if __name__ == '__main__':

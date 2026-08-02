@@ -9,13 +9,14 @@ import asyncio
 import json
 import uuid
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp import types
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
 from database.neo4j_client import Neo4jClient
+from mcp_servers._transport import run_server
+from mcp_servers.schemas import CreateHypothesisInput
 
 
 # ── Initialize server ─────────────────────────────────────────────────────
@@ -182,6 +183,12 @@ async def handle_find_gaps(args: dict) -> list[types.TextContent]:
 
 
 async def handle_create_hypothesis(args: dict) -> list[types.TextContent]:
+    try:
+        validated = CreateHypothesisInput.model_validate(args)
+    except Exception as e:
+        return [types.TextContent(type='text', text=f'Invalid input: {e}')]
+    args = validated.model_dump()
+
     neo4j         = get_neo4j()
     hypothesis_id = f'hyp_{uuid.uuid4().hex[:12]}'
 
@@ -274,12 +281,7 @@ async def handle_get_hypotheses(args: dict) -> list[types.TextContent]:
 
 async def main():
     print('[graph-mcp] Starting server...', file=sys.stderr)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+    await run_server(server, 'graph-mcp')
 
 
 if __name__ == '__main__':

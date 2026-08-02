@@ -1,69 +1,25 @@
 // app/api/events/route.ts
-// Returns recent Kafka events (reads from a simple in-memory buffer)
-// In production, this would read from a Kafka consumer or database
+// Proxies bridge.py's /events/recent — a real Kafka consumer — instead of
+// faking a timeline from Neo4j state. bridge.py owns the actual consumer;
+// this route just forwards its response to the dashboard.
 
 import { NextResponse } from 'next/server'
 
-// In-memory event buffer (populated by SSE or polling in production)
-// For now, returns mock recent events based on Neo4j state
-import { runQuery } from '@/lib/neo4j'
+const BRIDGE_URL = process.env.BRIDGE_URL || 'http://localhost:8010'
 
 export async function GET() {
   try {
-    // Build timeline from Neo4j state
-    const events: any[] = []
+    const res = await fetch(`${BRIDGE_URL}/events/recent?limit=50`, {
+      cache: 'no-store',
+    })
 
-    const hypotheses = await runQuery(`
-      MATCH (h:Hypothesis)
-      RETURN h.id AS id, h.statement AS statement, h.status AS status,
-             h.debate_score AS score
-      ORDER BY h.created_at DESC
-      LIMIT 10
-    `)
-
-    for (const h of hypotheses) {
-      events.push({
-        type: 'hypothesis.created',
-        agent: 'reasoner',
-        data: { hypothesis_id: h.id, statement: (h.statement || '').substring(0, 100) },
-        timestamp: new Date().toISOString(),
-      })
-
-      if (h.status === 'validated') {
-        events.push({
-          type: 'hypothesis.validated',
-          agent: 'skeptic',
-          data: { hypothesis_id: h.id, score: h.score },
-          timestamp: new Date().toISOString(),
-        })
-      } else if (h.status === 'rejected') {
-        events.push({
-          type: 'hypothesis.rejected',
-          agent: 'skeptic',
-          data: { hypothesis_id: h.id, score: h.score },
-          timestamp: new Date().toISOString(),
-        })
-      }
+    if (!res.ok) {
+      throw new Error(`bridge responded with ${res.status}`)
     }
 
-    const patents = await runQuery(`
-      MATCH (p:Patent)
-      RETURN p.id AS id, p.title AS title
-      ORDER BY p.created_at DESC
-      LIMIT 5
-    `)
-
-    for (const p of patents) {
-      events.push({
-        type: 'patent.drafted',
-        agent: 'inventor',
-        data: { patent_id: p.id, title: (p.title || '').substring(0, 100) },
-        timestamp: new Date().toISOString(),
-      })
-    }
-
+    const events = await res.json()
     return NextResponse.json(events)
   } catch (e: any) {
-    return NextResponse.json({ error: e.message }, { status: 500 })
+    return NextResponse.json({ error: e.message }, { status: 502 })
   }
 }

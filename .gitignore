@@ -30,6 +30,12 @@ apex_env/
 apex_env311/training/model/model.safetensors
 mlruns/
 mlflow.db
-training/data/
-training/model/
 apex_env311/
+
+# DVC-tracked — data itself lives in the DVC remote, only *.dvc pointers are committed
+training/data/*
+!training/data/*.dvc
+training/model/*
+!training/model/*.dvc
+data/exports/*
+!data/exports/*.dvc

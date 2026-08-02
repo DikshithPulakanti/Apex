@@ -1,21 +1,15 @@
 # tests/test_claude.py
-# Test Claude API + structured outputs
+# Tests for the claude_structured() JSON-parsing helper. The Anthropic
+# client is mocked (see conftest.fake_claude) — these tests never call
+# the real API, so they run for free and deterministically in CI.
 
-import sys
-import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-import anthropic
-from pydantic import BaseModel, Field
-from typing import List
-from dotenv import load_dotenv
 import json
+from typing import List
 
-from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
+from pydantic import BaseModel
 
+from tests.conftest import make_claude_json_message, make_claude_message
 
-# ── Define structured output models ──────────────────────────────────────
 
 class PaperSummary(BaseModel):
     main_contribution: str
@@ -32,27 +26,16 @@ class Hypothesis(BaseModel):
     predicted_impact: str
 
 
-# ── Helper: call Claude and parse JSON response ───────────────────────────
-
 def claude_structured(client, system: str, user: str, model_class):
-    """
-    Calls Claude and forces it to return JSON matching the Pydantic model.
-    We do this manually since instructor 0.4.8 works differently.
-    """
-    schema = model_class.model_json_schema()
-
+    """Calls Claude and parses its JSON response into the given Pydantic model."""
     message = client.messages.create(
-        model      = 'claude-sonnet-4-20250514',
-        max_tokens = 1000,
-        system     = system,
-        messages   = [
-            {'role': 'user', 'content': user}
-        ]
+        model='claude-sonnet-5',
+        max_tokens=1000,
+        system=system,
+        messages=[{'role': 'user', 'content': user}],
     )
 
-    text = message.content[0].text
-
-    # Extract JSON from response
+    text = next((b.text for b in message.content if b.type == 'text'), '')
     if '```json' in text:
         text = text.split('```json')[1].split('```')[0].strip()
     elif '```' in text:
@@ -62,97 +45,55 @@ def claude_structured(client, system: str, user: str, model_class):
     return model_class(**data)
 
 
-# ── Test functions ────────────────────────────────────────────────────────
+def test_basic_claude_call_returns_text(fake_claude):
+    fake_claude.messages.create.return_value = make_claude_json_message({'text': 'Claude API working'})
 
-def test_basic_claude_call(client):
-    print('\n--- Test 1: Basic Claude API call ---')
-    message = client.messages.create(
-        model      = 'claude-sonnet-4-20250514',
-        max_tokens = 50,
-        messages   = [
-            {'role': 'user', 'content': 'Say exactly: Claude API working'}
-        ]
-    )
-    response = message.content[0].text
-    print(f'  Response: {response}')
-    assert len(response) > 0
-    print('  ✓ Basic Claude API call working')
-
-
-def test_structured_output(client):
-    print('\n--- Test 2: Structured output ---')
-
-    abstract = """
-    We present BERT, a new language representation model which stands for
-    Bidirectional Encoder Representations from Transformers. BERT is designed
-    to pre-train deep bidirectional representations from unlabeled text.
-    The pre-trained BERT model can be fine-tuned for a wide range of NLP tasks.
-    """
-
-    system = f"""You are a research analyst. Analyze the paper abstract and return 
-a JSON object matching this exact schema:
-{json.dumps(PaperSummary.model_json_schema(), indent=2)}
-
-IMPORTANT: novelty_score must be a float between 0.0 and 1.0 (not 0-10).
-Return ONLY valid JSON, no other text."""
-
-    summary = claude_structured(
-        client, system,
-        f'Analyze this abstract:\n\n{abstract}',
-        PaperSummary
+    message = fake_claude.messages.create(
+        model='claude-sonnet-5', max_tokens=50,
+        messages=[{'role': 'user', 'content': 'Say exactly: Claude API working'}],
     )
 
-    print(f'  Main contribution: {summary.main_contribution[:80]}')
-    print(f'  Key concepts:      {summary.key_concepts}')
-    print(f'  Domain:            {summary.research_domain}')
-    print(f'  Novelty score:     {summary.novelty_score}')
+    assert json.loads(message.content[0].text)['text'] == 'Claude API working'
+
+
+def test_structured_output_parses_into_pydantic_model(fake_claude):
+    fake_claude.messages.create.return_value = make_claude_json_message({
+        'main_contribution': 'Bidirectional pre-training for language representations',
+        'key_concepts': ['bidirectional encoding', 'transformers', 'pre-training'],
+        'research_domain': 'NLP',
+        'novelty_score': 0.85,
+    })
+
+    summary = claude_structured(fake_claude, 'system prompt', 'user prompt', PaperSummary)
 
     assert isinstance(summary, PaperSummary)
-    assert len(summary.key_concepts) > 0
+    assert len(summary.key_concepts) == 3
     assert 0.0 <= summary.novelty_score <= 1.0
-    print('  ✓ Structured output working')
 
 
-def test_hypothesis_generation(client):
-    print('\n--- Test 3: Hypothesis generation ---')
+def test_structured_output_handles_code_fenced_json(fake_claude):
+    fenced = '```json\n' + json.dumps({
+        'main_contribution': 'x', 'key_concepts': ['a'],
+        'research_domain': 'AI', 'novelty_score': 0.5,
+    }) + '\n```'
+    fake_claude.messages.create.return_value = make_claude_message(fenced)
 
-    gap_context = """
-    Research gap:
-    Concept 1: "automatic parallelization" (compiler optimization domain)
-    Concept 2: "large language models" (NLP domain)
-    These concepts come from different communities and rarely co-occur.
-    """
+    summary = claude_structured(fake_claude, 'system', 'user', PaperSummary)
 
-    system = f"""You are a scientific research assistant. Generate a novel hypothesis 
-based on the research gap. Return a JSON object matching this schema:
-{json.dumps(Hypothesis.model_json_schema(), indent=2)}
+    assert summary.research_domain == 'AI'
 
-IMPORTANT: testability_score must be a float between 0.0 and 1.0 (not 0-10).
-Return ONLY valid JSON, no other text."""
 
-    hypothesis = claude_structured(
-        client, system,
-        f'Generate a hypothesis for this gap:\n\n{gap_context}',
-        Hypothesis
-    )
+def test_hypothesis_generation_parses_into_pydantic_model(fake_claude):
+    fake_claude.messages.create.return_value = make_claude_json_message({
+        'statement': 'Automatic parallelization techniques can accelerate LLM training loops.',
+        'rationale': 'Both fields optimize computation graphs but rarely intersect.',
+        'supporting_concepts': ['automatic parallelization', 'large language models'],
+        'testability_score': 0.75,
+        'predicted_impact': 'Faster training pipelines for large models.',
+    })
 
-    print(f'  Statement:   {hypothesis.statement}')
-    print(f'  Testability: {hypothesis.testability_score}')
-    print(f'  Impact:      {hypothesis.predicted_impact[:80]}')
+    hypothesis = claude_structured(fake_claude, 'system', 'user', Hypothesis)
 
     assert isinstance(hypothesis, Hypothesis)
     assert len(hypothesis.statement) > 20
     assert 0.0 <= hypothesis.testability_score <= 1.0
-    print('  ✓ Hypothesis generation working')
-
-
-if __name__ == '__main__':
-    print('=== Claude API Tests ===')
-
-    client = anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY'))
-
-    test_basic_claude_call(client)
-    test_structured_output(client)
-    test_hypothesis_generation(client)
-
-    print('\n✅ All Claude API tests passed.')

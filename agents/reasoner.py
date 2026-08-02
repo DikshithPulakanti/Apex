@@ -15,6 +15,7 @@ from dotenv import load_dotenv
 from database.neo4j_client import Neo4jClient
 from database.weaviate_client import WeaviateClient
 from database.embedder import Embedder
+from events.node_tracing import node_tracer
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
@@ -66,7 +67,7 @@ def select_seed(state: ReasonerState, resources: dict) -> dict:
 
     try:
         neo4j = resources['neo4j']
-        gaps  = neo4j.find_research_gaps(min_pagerank=0.3, limit=5)
+        gaps  = neo4j.find_research_gaps_for_seed(state['seed_concept'], min_pagerank=0.1, limit=5)
 
         if not gaps:
             return {
@@ -184,8 +185,8 @@ Return ONLY a JSON object with these exact fields:
 }}"""
 
         message = claude.messages.create(
-            model      = 'claude-sonnet-4-20250514',
-            max_tokens = 800,
+            model      = 'claude-sonnet-5',
+            max_tokens = 3000,
             system     = (
                 'You are a scientific research assistant specializing in cross-domain '
                 'hypothesis generation. Generate novel, testable hypotheses that bridge '
@@ -194,7 +195,7 @@ Return ONLY a JSON object with these exact fields:
             messages   = [{'role': 'user', 'content': prompt}]
         )
 
-        text = message.content[0].text.strip()
+        text = next((b.text for b in message.content if b.type == 'text'), '').strip()
 
         # Parse JSON
         if '```json' in text:
@@ -335,11 +336,12 @@ def build_reasoner(resources: dict):
         return store_hypothesis(state, resources)
 
     graph = StateGraph(ReasonerState)
+    trace = node_tracer('reasoner')
 
-    graph.add_node('select_seed',        node_seed)
-    graph.add_node('gather_context',     node_context)
-    graph.add_node('generate_hypothesis', node_generate)
-    graph.add_node('store_hypothesis',   node_store)
+    trace(graph, 'select_seed',         node_seed,     watch=['status', 'error'])
+    trace(graph, 'gather_context',      node_context,  watch=['status', 'error'])
+    trace(graph, 'generate_hypothesis', node_generate, watch=['status', 'attempts', 'error'])
+    trace(graph, 'store_hypothesis',    node_store,    watch=['status', 'hypothesis_id', 'error'])
 
     graph.add_edge('select_seed',    'gather_context')
     graph.add_edge('gather_context', 'generate_hypothesis')

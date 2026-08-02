@@ -9,13 +9,14 @@ import asyncio
 import json
 import anthropic
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp import types
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
 from database.neo4j_client import Neo4jClient
+from mcp_servers._transport import run_server
+from mcp_servers.schemas import DraftPatentInput
 
 
 server  = Server('patent-mcp')
@@ -131,9 +132,14 @@ async def call_tool(name: str, arguments: dict) -> list[types.TextContent]:
 
 async def handle_draft_patent(args: dict) -> list[types.TextContent]:
     """Uses Claude to draft patent claims."""
-    statement = args['hypothesis_statement']
-    concepts  = args.get('supporting_concepts', [])
-    impact    = args.get('predicted_impact', '')
+    try:
+        validated = DraftPatentInput.model_validate(args)
+    except Exception as e:
+        return [types.TextContent(type='text', text=f'Invalid input: {e}')]
+
+    statement = validated.hypothesis_statement
+    concepts  = validated.supporting_concepts
+    impact    = validated.predicted_impact
     claude    = get_claude()
 
     prompt = f"""Draft a structured patent application for this invention:
@@ -154,12 +160,12 @@ Return ONLY a JSON object with this structure:
 }}"""
 
     message = claude.messages.create(
-        model      = 'claude-sonnet-4-20250514',
-        max_tokens = 1000,
+        model      = 'claude-sonnet-5',
+        max_tokens = 3000,
         messages   = [{'role': 'user', 'content': prompt}]
     )
 
-    text = message.content[0].text.strip()
+    text = next((b.text for b in message.content if b.type == 'text'), '').strip()
     if '```json' in text:
         text = text.split('```json')[1].split('```')[0].strip()
     elif '```' in text:
@@ -236,12 +242,7 @@ async def handle_novelty_score(args: dict) -> list[types.TextContent]:
 
 async def main():
     print('[patent-mcp] Starting server...', file=sys.stderr)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+    await run_server(server, 'patent-mcp')
 
 
 if __name__ == '__main__':
