@@ -1,0 +1,38 @@
+stages:
+  ingest:
+    cmd: python pipeline/ingest.py
+    deps:
+      - pipeline/ingest.py
+      - scrapers/arxiv_scraper.py
+      - scrapers/queries.py
+    # Mutates live Neo4j/Redis/Postgres rather than producing a tracked file —
+    # there's nothing to hash, so treat it as always out of date.
+    always_changed: true
+
+  extract_concepts:
+    cmd: python pipeline/extract_concepts.py
+    deps:
+      - pipeline/extract_concepts.py
+    always_changed: true
+
+  run_gds:
+    cmd: python pipeline/run_gds.py
+    deps:
+      - pipeline/run_gds.py
+    always_changed: true
+
+  export_corpus_snapshot:
+    cmd: python pipeline/export_corpus_snapshot.py
+    deps:
+      - pipeline/export_corpus_snapshot.py
+    outs:
+      - data/exports/papers_snapshot.jsonl
+
+  train_bert:
+    cmd: python training/train_bert.py
+    deps:
+      - training/train_bert.py
+      - training/predictor.py
+      - training/data/hypotheses.csv
+    outs:
+      - training/model

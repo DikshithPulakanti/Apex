@@ -305,6 +305,74 @@ class Neo4jClient:
         print(f'[Neo4jClient] Found {len(gaps)} research gaps.')
         return gaps
 
+    
+    def find_research_gaps_for_seed(self, seed_concept: str,
+                                     min_pagerank: float = 0.1,
+                                     limit: int = 5) -> list:
+        """
+        Finds research gaps relevant to a specific seed concept.
+        
+        1. Find concepts that co-occur with the seed (or are semantically close)
+        2. Find cross-community gaps involving those concepts
+        3. Falls back to global gaps if no seed-specific gaps found
+        """
+        query = """
+            // Find concepts in the same neighborhood as the seed
+            MATCH (seed:Concept)
+            WHERE toLower(seed.name) CONTAINS toLower($seed)
+            
+            // Get concepts that co-occur with seed-related concepts
+            MATCH (seed)-[:CO_OCCURS_WITH*1..2]-(neighbor:Concept)
+            WHERE neighbor.pagerank >= $min_pagerank
+            AND neighbor.community IS NOT NULL
+            AND neighbor <> seed
+            
+            WITH DISTINCT neighbor AS c1, seed
+            
+            // Find cross-community pairs
+            MATCH (c2:Concept)
+            WHERE c2.pagerank >= $min_pagerank
+            AND c2.community IS NOT NULL
+            AND c1 <> c2
+            AND c1.community <> c2.community
+            AND c1.name < c2.name
+            
+            OPTIONAL MATCH (c1)-[r:CO_OCCURS_WITH]-(c2)
+            WITH c1, c2,
+                 coalesce(r.weight, 0) AS co_occurrence
+            
+            WITH c1, c2, co_occurrence,
+                 (c1.pagerank * c2.pagerank) / (co_occurrence + 1)
+                 AS gap_score
+            
+            RETURN c1.name        AS concept1,
+                   c2.name        AS concept2,
+                   c1.community   AS community1,
+                   c2.community   AS community2,
+                   c1.pagerank    AS pagerank1,
+                   c2.pagerank    AS pagerank2,
+                   co_occurrence,
+                   gap_score
+            ORDER BY gap_score DESC
+            LIMIT $limit
+        """
+        gaps = []
+        with self.driver.session() as session:
+            result = session.run(query,
+                seed         = seed_concept,
+                min_pagerank = min_pagerank,
+                limit        = limit)
+            for record in result:
+                gaps.append(dict(record))
+
+        if gaps:
+            print(f'[Neo4jClient] Found {len(gaps)} seed-specific gaps for "{seed_concept}".')
+            return gaps
+
+        # Fallback to global gaps
+        print(f'[Neo4jClient] No seed-specific gaps for "{seed_concept}", falling back to global.')
+        return self.find_research_gaps(min_pagerank=min_pagerank, limit=limit)
+
     # ── Stats ─────────────────────────────────────────────────────────────
 
     def get_stats(self) -> dict:

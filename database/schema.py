@@ -22,25 +22,25 @@ SCHEMA_QUERIES = [
     """
     MERGE (a:Agent {name: 'Harvester'})
     SET a.role   = 'Ingests and processes scientific papers',
-        a.model  = 'claude-sonnet-4-20250514',
+        a.model  = 'claude-sonnet-5',
         a.status = 'idle'
     """,
     """
     MERGE (a:Agent {name: 'Reasoner'})
     SET a.role   = 'Traverses knowledge graph and generates hypotheses',
-        a.model  = 'claude-sonnet-4-20250514',
+        a.model  = 'claude-sonnet-5',
         a.status = 'idle'
     """,
     """
     MERGE (a:Agent {name: 'Skeptic'})
     SET a.role   = 'Adversarially challenges hypotheses',
-        a.model  = 'claude-sonnet-4-20250514',
+        a.model  = 'claude-sonnet-5',
         a.status = 'idle'
     """,
     """
     MERGE (a:Agent {name: 'Inventor'})
     SET a.role   = 'Drafts patent claims from validated hypotheses',
-        a.model  = 'claude-sonnet-4-20250514',
+        a.model  = 'claude-sonnet-5',
         a.status = 'idle'
     """,
 ]
