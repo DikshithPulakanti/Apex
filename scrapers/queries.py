@@ -23,4 +23,15 @@ APEX_QUERIES = [
     'all:multi-agent AND simulation',
     'all:foundation model AND chemistry',
     'all:autonomous research AND hypothesis',
+    # Broader AI/ML + systems categories
+    'cat:stat.ML',
+    'cat:cs.IR',
+    'cat:cs.DC',
+    'cat:cs.SE',
+    'cat:math.OC',
+    'cat:eess.SP',
+    'cat:q-bio.QM',
+    # More cross-domain keyword searches
+    'all:causal inference AND healthcare',
+    'all:federated learning AND genomics',
 ]

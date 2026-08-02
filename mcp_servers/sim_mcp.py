@@ -10,12 +10,13 @@ import json
 import random
 import math
 from mcp.server import Server
-from mcp.server.stdio import stdio_server
 from mcp import types
 from dotenv import load_dotenv
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
 
+from mcp_servers._transport import run_server
+from mcp_servers.schemas import SimulationInput
 
 server = Server('sim-mcp')
 
@@ -122,9 +123,14 @@ async def handle_simulation(args: dict) -> list[types.TextContent]:
     Uses testability score as the base probability of each trial succeeding.
     Higher testability = more likely to show positive results in simulation.
     """
-    statement        = args['hypothesis_statement']
-    testability      = args.get('testability_score', 0.5)
-    n_simulations    = args.get('n_simulations', 1000)
+    try:
+        validated = SimulationInput.model_validate(args)
+    except Exception as e:
+        return [types.TextContent(type='text', text=f'Invalid input: {e}')]
+
+    statement        = validated.hypothesis_statement
+    testability      = validated.testability_score
+    n_simulations    = validated.n_simulations
 
     # Run Monte Carlo trials
     random.seed(42)
@@ -223,12 +229,7 @@ async def handle_validation(args: dict) -> list[types.TextContent]:
 
 async def main():
     print('[sim-mcp] Starting server...', file=sys.stderr)
-    async with stdio_server() as (read_stream, write_stream):
-        await server.run(
-            read_stream,
-            write_stream,
-            server.create_initialization_options()
-        )
+    await run_server(server, 'sim-mcp')
 
 
 if __name__ == '__main__':
