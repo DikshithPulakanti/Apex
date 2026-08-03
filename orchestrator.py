@@ -13,7 +13,7 @@ from events.agent_events import (
     emit_hypothesis_created,
     emit_hypothesis_validated,
     emit_hypothesis_rejected,
-    emit_patent_drafted,
+    emit_research_plan_created,
 )
 
 from dotenv import load_dotenv
@@ -24,9 +24,9 @@ def run_pipeline(seed_concept: str = "large language models"):
     """
     Full APEX pipeline:
     1. Harvester — scrape papers (skip if already ingested)
-    2. Reasoner — find gaps, generate hypothesis
-    3. Skeptic — debate and validate
-    4. Inventor — draft patent from validated hypothesis
+    2. Reasoner — find gaps, generate up to 5 candidate hypotheses
+    3. Skeptic — debate and validate each candidate
+    4. Inventor — draft a research plan for each validated candidate
     """
 
     print("=" * 60)
@@ -49,8 +49,10 @@ def run_pipeline(seed_concept: str = "large language models"):
         print("  ⚠️  Low paper count — run pipeline/ingest.py first")
         print("  Continuing with existing data...")
 
+    neo4j.close()
+
     # ── Reasoner ─────────────────────────────────────────────────
-    print(f"\n[2/5] Reasoner — generating hypothesis from '{seed_concept}'...")
+    print(f"\n[2/5] Reasoner — generating candidate directions from '{seed_concept}'...")
     emit_agent_status('reasoner', 'starting', {'seed': seed_concept})
 
     from agents.reasoner import build_reasoner, get_resources as reasoner_resources
@@ -59,98 +61,114 @@ def run_pipeline(seed_concept: str = "large language models"):
     reasoner = build_reasoner(r_resources)
 
     r_state = reasoner.invoke({
-        'seed_concept':    seed_concept,
-        'research_gaps':   [],
-        'context_papers':  [],
-        'hypothesis':      {},
-        'hypothesis_id':   '',
-        'testability':     0.0,
-        'status':          'starting',
-        'error':           ''
+        'seed_concept': seed_concept,
+        'gaps_found':   [],
+        'candidates':   [],
+        'stored':       [],
+        'status':       'starting',
+        'error':        ''
     })
 
-    hypothesis_id = r_state.get('hypothesis_id', '')
-    hypothesis_text = r_state.get('hypothesis', {}).get('statement', '')
-    testability = r_state.get('testability', 0.0)
+    stored = r_state.get('stored', [])
+    r_resources['neo4j'].close()
+    r_resources['weaviate'].close()
 
-    if not hypothesis_id:
-        print("  ❌ Reasoner failed to generate hypothesis")
+    if not stored:
+        print("  ❌ Reasoner failed to generate any hypotheses")
         emit_agent_status('reasoner', 'failed')
         return
 
-    print(f"  ✅ Hypothesis: {hypothesis_id}")
-    emit_hypothesis_created(hypothesis_id, hypothesis_text, testability)
-    r_resources['neo4j'].close()
+    print(f"  ✅ Generated {len(stored)} candidate(s)")
+    for item in stored:
+        emit_hypothesis_created(
+            item['hypothesis_id'], item['hypothesis']['statement'],
+            item['hypothesis']['testability_score'],
+        )
 
-    # ── Skeptic ──────────────────────────────────────────────────
-    print(f"\n[3/5] Skeptic — debating {hypothesis_id}...")
-    emit_agent_status('skeptic', 'starting', {'hypothesis_id': hypothesis_id})
+    # ── Skeptic + Inventor, once per candidate ────────────────────
+    # Each candidate is independent — a crash debating or drafting a plan
+    # for one (e.g. a malformed JSON response from Claude) must not lose
+    # the others, several of which may have already succeeded.
+    results = []
+    for item in stored:
+        hypothesis_id = item['hypothesis_id']
+        try:
+            print(f"\n[3/5] Skeptic — debating {hypothesis_id}...")
+            emit_agent_status('skeptic', 'starting', {'hypothesis_id': hypothesis_id})
 
-    from agents.skeptic import build_skeptic, get_resources as skeptic_resources
+            from agents.skeptic import build_skeptic, get_resources as skeptic_resources
 
-    s_resources = skeptic_resources()
-    skeptic = build_skeptic(s_resources)
+            s_resources = skeptic_resources()
+            try:
+                skeptic = build_skeptic(s_resources)
+                s_state = skeptic.invoke({
+                    'hypothesis_id':    hypothesis_id,
+                    'hypothesis':       {},
+                    'counterarguments': [],
+                    'rebuttal':         '',
+                    'debate_score':     0.0,
+                    'rounds_completed': 0,
+                    'verdict':          '',
+                    'status':           'starting',
+                    'error':            '',
+                    'bert_confidence':  0.0,
+                    'bert_verdict':     '',
+                    'claude_score':     0.0,
+                    'claude_reasoning': '',
+                    'scoring_method':   '',
+                    'mlflow_run_id':    '',
+                })
+            finally:
+                s_resources['neo4j'].close()
 
-    s_state = skeptic.invoke({
-        'hypothesis_id':    hypothesis_id,
-        'hypothesis':       {},
-        'counterarguments': [],
-        'rebuttal':         '',
-        'debate_score':     0.0,
-        'rounds_completed': 0,
-        'verdict':          '',
-        'status':           'starting',
-        'error':            '',
-        'bert_confidence':  0.0,
-        'bert_verdict':     '',
-        'claude_score':     0.0,
-        'claude_reasoning': '',
-        'scoring_method':   '',
-        'mlflow_run_id':    '',
-    })
+            verdict = s_state.get('verdict', 'rejected')
+            debate_score = s_state.get('debate_score', 0.0)
 
-    verdict = s_state.get('verdict', 'rejected')
-    debate_score = s_state.get('debate_score', 0.0)
-    s_resources['neo4j'].close()
+            if verdict == 'approved':
+                print(f"  ✅ Validated (score: {debate_score})")
+                emit_hypothesis_validated(hypothesis_id, debate_score,
+                    method=s_state.get('scoring_method', 'claude'))
+                plan_id, novelty, title = run_inventor_phase(hypothesis_id)
+                results.append({'hypothesis_id': hypothesis_id, 'verdict': verdict, 'plan_id': plan_id})
+            elif verdict == 'pending_review':
+                print(f"  ⏸️  Flagged for human review (BERT: {s_state.get('bert_confidence', 0.0):.2f}, "
+                      f"Claude: {s_state.get('claude_score', 0.0):.2f})")
+                emit_agent_status('orchestrator', 'pipeline_paused', {
+                    'hypothesis_id': hypothesis_id,
+                    'reason': 'pending_human_review',
+                })
+                results.append({'hypothesis_id': hypothesis_id, 'verdict': verdict, 'plan_id': ''})
+            else:
+                print(f"  ❌ Rejected (score: {debate_score})")
+                emit_hypothesis_rejected(hypothesis_id, debate_score)
+                results.append({'hypothesis_id': hypothesis_id, 'verdict': verdict, 'plan_id': ''})
 
-    if verdict == 'approved':
-        print(f"  ✅ Validated (score: {debate_score})")
-        emit_hypothesis_validated(hypothesis_id, debate_score,
-            method=s_state.get('scoring_method', 'claude'))
-    elif verdict == 'pending_review':
-        print(f"  ⏸️  Flagged for human review (BERT: {s_state.get('bert_confidence', 0.0):.2f}, "
-              f"Claude: {s_state.get('claude_score', 0.0):.2f})")
-        emit_agent_status('orchestrator', 'pipeline_paused', {
-            'hypothesis_id': hypothesis_id,
-            'reason': 'pending_human_review',
-        })
-        return
-    else:
-        print(f"  ❌ Rejected (score: {debate_score})")
-        emit_hypothesis_rejected(hypothesis_id, debate_score)
-        emit_agent_status('orchestrator', 'pipeline_complete', {'result': 'rejected'})
-        return
-
-    # ── Inventor ─────────────────────────────────────────────────
-    patent_id, novelty, title = run_inventor_phase(hypothesis_id)
+        except Exception as e:
+            print(f"  ❌ Error processing {hypothesis_id}: {e}")
+            emit_agent_status('orchestrator', 'candidate_failed', {
+                'hypothesis_id': hypothesis_id, 'error': str(e),
+            })
+            results.append({'hypothesis_id': hypothesis_id, 'verdict': 'error', 'plan_id': ''})
 
     # ── Summary ──────────────────────────────────────────────────
     elapsed = time.time() - start
+    approved = sum(1 for r in results if r['verdict'] == 'approved')
+    pending = sum(1 for r in results if r['verdict'] == 'pending_review')
+    rejected = sum(1 for r in results if r['verdict'] == 'rejected')
+    failed = sum(1 for r in results if r['verdict'] == 'error')
 
     print("\n" + "=" * 60)
     print("  APEX Pipeline Complete")
     print("=" * 60)
     print(f"  Seed concept:  {seed_concept}")
-    print(f"  Hypothesis:    {hypothesis_id}")
-    print(f"  Verdict:       {verdict} ({debate_score})")
-    print(f"  Patent:        {patent_id}")
+    print(f"  Candidates:    {len(results)} ({approved} approved, {pending} pending review, "
+          f"{rejected} rejected, {failed} failed)")
     print(f"  Time:          {elapsed:.1f}s")
     print("=" * 60)
 
     emit_agent_status('orchestrator', 'pipeline_complete', {
-        'hypothesis_id': hypothesis_id,
-        'patent_id': patent_id,
-        'verdict': verdict,
+        'seed_concept': seed_concept,
+        'results': results,
         'elapsed_seconds': round(elapsed, 1),
     })
 
@@ -158,14 +176,14 @@ def run_pipeline(seed_concept: str = "large language models"):
 def run_inventor_phase(hypothesis_id: str):
     """
     Runs the Inventor agent on a validated hypothesis and publishes the
-    patent.drafted event. Factored out so both the main pipeline (after an
-    auto-approval) and the human-review UI (after a manual approval) can
-    trigger patent drafting the same way.
+    research_plan.created event. Factored out so both the main pipeline
+    (after an auto-approval) and the human-review UI (after a manual
+    approval) can trigger it the same way.
 
-    Returns (patent_id, novelty_score, title) — patent_id is '' on failure
-    or skip.
+    Returns (plan_id, novelty_score, methodology_sketch) — plan_id is ''
+    on failure or skip.
     """
-    print(f"\n[4/5] Inventor — drafting patent for {hypothesis_id}...")
+    print(f"\n[4/5] Inventor — checking prior art and drafting a research plan for {hypothesis_id}...")
     emit_agent_status('inventor', 'starting', {'hypothesis_id': hypothesis_id})
 
     from agents.inventor import build_inventor, get_resources as inventor_resources
@@ -177,27 +195,29 @@ def run_inventor_phase(hypothesis_id: str):
         'hypothesis_id': hypothesis_id,
         'hypothesis':    {},
         'novelty_score': 0.0,
+        'prior_art':     [],
         'sim_result':    {},
-        'patent_draft':  {},
-        'patent_id':     '',
+        'plan_draft':    {},
+        'plan_id':       '',
         'status':        'starting',
         'error':         ''
     })
 
     i_resources['neo4j'].close()
+    i_resources['weaviate'].close()
 
-    patent_id = i_state.get('patent_id', '')
+    plan_id = i_state.get('plan_id', '')
     novelty = i_state.get('novelty_score', 0.0)
-    title = i_state.get('patent_draft', {}).get('title', '')
+    methodology_sketch = i_state.get('plan_draft', {}).get('methodology_sketch', '')
 
-    if patent_id:
-        print(f"  ✅ Patent: {patent_id}")
-        print(f"  Title: {title[:80]}")
-        emit_patent_drafted(patent_id, hypothesis_id, title, novelty)
+    if plan_id:
+        print(f"  ✅ Research plan: {plan_id}")
+        print(f"  Methodology: {methodology_sketch[:80]}")
+        emit_research_plan_created(plan_id, hypothesis_id, methodology_sketch, novelty)
     else:
-        print("  ❌ Patent drafting failed")
+        print("  ❌ Research plan drafting failed or skipped")
 
-    return patent_id, novelty, title
+    return plan_id, novelty, methodology_sketch
 
 
 if __name__ == '__main__':

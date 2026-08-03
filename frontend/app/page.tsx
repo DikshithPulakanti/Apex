@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react'
 import KnowledgeGraph from './graph'
+import HypothesisCard, { Hypothesis } from './components/HypothesisCard'
 
 // ── Types ────────────────────────────────────────────────────────────────
 
@@ -11,19 +12,10 @@ interface Stats {
   concepts: number
   hypotheses: number
   patents: number
+  researchPlans: number
   validated: number
   rejected: number
   relationships: number
-}
-
-interface Hypothesis {
-  id: string
-  statement: string
-  status: string
-  testability: number
-  debate_score: number
-  rebuttal: string
-  source_papers: string[]
 }
 
 interface AgentEvent {
@@ -43,21 +35,6 @@ function StatCard({ label, value, color }: { label: string; value: number; color
         {value.toLocaleString()}
       </p>
     </div>
-  )
-}
-
-// ── Status Badge ─────────────────────────────────────────────────────────
-
-function StatusBadge({ status }: { status: string }) {
-  const colors: Record<string, string> = {
-    proposed: 'bg-yellow-900 text-yellow-300',
-    validated: 'bg-green-900 text-green-300',
-    rejected: 'bg-red-900 text-red-300',
-  }
-  return (
-    <span className={`px-2 py-1 rounded-full text-xs font-medium ${colors[status] || 'bg-gray-700 text-gray-300'}`}>
-      {status}
-    </span>
   )
 }
 
@@ -146,6 +123,9 @@ export default function Dashboard() {
             </p>
           </div>
           <div className="flex items-center gap-4">
+            <a href="/directions" className="text-sm text-cyan-400 hover:underline">
+              Explore Directions →
+            </a>
             <a href="/review" className="text-sm text-cyan-400 hover:underline">
               Review Queue →
             </a>
@@ -170,7 +150,8 @@ export default function Dashboard() {
               <StatCard label="Hypotheses" value={stats.hypotheses} color="text-yellow-400" />
               <StatCard label="Validated" value={stats.validated} color="text-green-400" />
               <StatCard label="Rejected" value={stats.rejected} color="text-red-400" />
-              <StatCard label="Patents" value={stats.patents} color="text-amber-400" />
+              <StatCard label="Research Plans" value={stats.researchPlans} color="text-amber-400" />
+              <StatCard label="Patents" value={stats.patents} color="text-gray-500" />
             </div>
           </section>
         )}
@@ -187,39 +168,7 @@ export default function Dashboard() {
             </h2>
             <div className="space-y-3">
               {hypotheses.map(h => (
-                <div key={h.id} className="rounded-xl border border-gray-800 bg-gray-900 p-5">
-                  <div className="flex items-start justify-between gap-4">
-                    <div className="flex-1">
-                      <div className="flex items-center gap-3 mb-2">
-                        <code className="text-xs text-gray-500">{h.id}</code>
-                        <StatusBadge status={h.status} />
-                      </div>
-                      <p className="text-gray-200 text-sm leading-relaxed">
-                        {h.statement}
-                      </p>
-                      {h.source_papers && h.source_papers.length > 0 && (
-                        <div className="mt-3">
-                          <p className="text-xs text-gray-500 mb-1">Source papers:</p>
-                          {h.source_papers.map((p, i) => (
-                            <p key={i} className="text-xs text-gray-600 truncate">• {p}</p>
-                          ))}
-                        </div>
-                      )}
-                    </div>
-                    <div className="text-right shrink-0">
-                      {h.testability != null && (
-                        <p className="text-xs text-gray-500">
-                          Testability: <span className="text-cyan-400">{h.testability}</span>
-                        </p>
-                      )}
-                      {h.debate_score != null && (
-                        <p className="text-xs text-gray-500">
-                          Debate: <span className="text-yellow-400">{h.debate_score}</span>
-                        </p>
-                      )}
-                    </div>
-                  </div>
-                </div>
+                <HypothesisCard key={h.id} hypothesis={h} />
               ))}
               {hypotheses.length === 0 && (
                 <p className="text-gray-600 text-sm">No hypotheses yet. Run the Reasoner agent.</p>

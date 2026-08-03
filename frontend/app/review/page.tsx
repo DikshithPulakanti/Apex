@@ -62,7 +62,7 @@ export default function ReviewQueue() {
 
       setMessage(
         decision === 'approved'
-          ? `Approved ${hypothesisId}${data.patent_id ? ` — patent ${data.patent_id} drafted` : ''}`
+          ? `Approved ${hypothesisId}${data.plan_id ? ` — research plan ${data.plan_id} drafted` : ''}`
           : `Rejected ${hypothesisId}`
       )
       await fetchReviews()

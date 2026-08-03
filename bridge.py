@@ -128,12 +128,12 @@ def decide_review(hypothesis_id: str, body: ReviewDecision):
     else:
         emit_hypothesis_rejected(hypothesis_id, 0.0, reason='rejected by human reviewer')
 
-    patent_id = None
+    plan_id = None
     if body.decision == 'approved':
         from orchestrator import run_inventor_phase
-        patent_id, _, _ = run_inventor_phase(hypothesis_id)
+        plan_id, _, _ = run_inventor_phase(hypothesis_id)
 
-    return {'hypothesis_id': hypothesis_id, 'status': status, 'patent_id': patent_id}
+    return {'hypothesis_id': hypothesis_id, 'status': status, 'plan_id': plan_id}
 
 
 if __name__ == '__main__':

@@ -7,11 +7,11 @@ from unittest.mock import MagicMock
 from events import kafka_manager
 
 
-def test_topics_list_has_exactly_six_entries():
-    assert len(kafka_manager.TOPICS) == 6
+def test_topics_list_has_exactly_seven_entries():
+    assert len(kafka_manager.TOPICS) == 7
     assert set(kafka_manager.TOPICS) == {
         'papers.ingested', 'hypothesis.created', 'hypothesis.validated',
-        'hypothesis.rejected', 'patent.drafted', 'agent.status',
+        'hypothesis.rejected', 'patent.drafted', 'research_plan.created', 'agent.status',
     }
 
 
