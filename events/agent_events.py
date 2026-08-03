@@ -73,7 +73,8 @@ def emit_hypothesis_rejected(hypothesis_id: str, score: float, reason: str = '')
 
 
 def emit_patent_drafted(patent_id: str, hypothesis_id: str, title: str, novelty: float):
-    """Inventor drafted a patent."""
+    """Inventor drafted a patent. Legacy path, kept for any historical
+    patent data — the live pipeline now emits emit_research_plan_created."""
     get_publisher().publish(
         topic='patent.drafted',
         agent='inventor',
@@ -84,6 +85,21 @@ def emit_patent_drafted(patent_id: str, hypothesis_id: str, title: str, novelty:
             'novelty_score': novelty,
         },
         key=patent_id,
+    )
+
+
+def emit_research_plan_created(plan_id: str, hypothesis_id: str, methodology_summary: str, novelty: float):
+    """Inventor drafted a next-steps research plan."""
+    get_publisher().publish(
+        topic='research_plan.created',
+        agent='inventor',
+        data={
+            'plan_id': plan_id,
+            'hypothesis_id': hypothesis_id,
+            'methodology_summary': methodology_summary[:200],
+            'novelty_score': novelty,
+        },
+        key=plan_id,
     )
 
 

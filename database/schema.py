@@ -12,6 +12,7 @@ SCHEMA_QUERIES = [
     'CREATE CONSTRAINT paper_id_unique   IF NOT EXISTS FOR (p:Paper)      REQUIRE p.id   IS UNIQUE',
     'CREATE CONSTRAINT concept_name_uniq IF NOT EXISTS FOR (c:Concept)    REQUIRE c.name IS UNIQUE',
     'CREATE CONSTRAINT hyp_id_unique     IF NOT EXISTS FOR (h:Hypothesis) REQUIRE h.id   IS UNIQUE',
+    'CREATE CONSTRAINT plan_id_unique    IF NOT EXISTS FOR (pl:ResearchPlan) REQUIRE pl.id IS UNIQUE',
 
     # ── Extra indexes for nodes without constraints ────────────────────────
     'CREATE INDEX author_name  IF NOT EXISTS FOR (a:Author) ON (a.name)',
@@ -39,7 +40,7 @@ SCHEMA_QUERIES = [
     """,
     """
     MERGE (a:Agent {name: 'Inventor'})
-    SET a.role   = 'Drafts patent claims from validated hypotheses',
+    SET a.role   = 'Checks prior art and drafts a research plan from validated hypotheses',
         a.model  = 'claude-sonnet-5',
         a.status = 'idle'
     """,

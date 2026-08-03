@@ -35,14 +35,12 @@ def empty_hypothesis():
 # ── State ─────────────────────────────────────────────────────────────────
 
 class ReasonerState(TypedDict):
-    seed_concept:    str        # starting concept for traversal
-    gaps_found:      List[dict] # research gaps from Neo4j
-    context_papers:  List[dict] # papers fetched from Weaviate
-    hypothesis:      dict       # generated hypothesis
-    hypothesis_id:   str        # Neo4j id after storing
-    attempts:        int        # retry counter
-    status:          str        # current status
-    error:           str        # error if something failed
+    seed_concept: str        # starting concept for traversal
+    gaps_found:   List[dict] # research gaps from Neo4j
+    candidates:   List[dict] # one per gap: {gap, context_papers, hypothesis, attempts}
+    stored:       List[dict] # one per stored hypothesis: {hypothesis_id, hypothesis}
+    status:       str        # current status
+    error:        str        # error if something failed
 
 
 # ── Resources ─────────────────────────────────────────────────────────────
@@ -94,83 +92,72 @@ def select_seed(state: ReasonerState, resources: dict) -> dict:
 
 def gather_context(state: ReasonerState, resources: dict) -> dict:
     """
-    For the top research gap, fetches relevant papers from Weaviate.
-    These papers give Claude context for hypothesis generation.
+    For every research gap found (not just the top one), fetches relevant
+    papers from Weaviate. These papers give Claude context for hypothesis
+    generation, one candidate hypothesis per gap.
     """
-    print(f'\n[Reasoner:gather_context] Gathering context papers...')
+    gaps = state['gaps_found']
+    print(f'\n[Reasoner:gather_context] Gathering context for {len(gaps)} gap(s)...')
 
-    if not state['gaps_found']:
-        return {'context_papers': [], 'status': 'no gaps to gather context for'}
+    if not gaps:
+        return {'candidates': [], 'status': 'no gaps to gather context for'}
 
-    try:
-        weaviate = resources['weaviate']
-        embedder = resources['embedder']
+    weaviate   = resources['weaviate']
+    embedder   = resources['embedder']
+    candidates = []
 
-        # Use the top gap
-        top_gap   = state['gaps_found'][0]
-        gap_query = f'{top_gap["concept1"]} {top_gap["concept2"]}'
-
+    for gap in gaps:
+        gap_query = f'{gap["concept1"]} {gap["concept2"]}'
         print(f'[Reasoner:gather_context] Searching for: "{gap_query}"')
 
-        query_vec = embedder.embed_text(gap_query)
-        papers    = weaviate.hybrid_search(
-            query_text   = gap_query,
-            query_vector = query_vec,
-            limit        = 5,
-            alpha        = 0.6
-        )
+        try:
+            query_vec = embedder.embed_text(gap_query)
+            papers    = weaviate.hybrid_search(
+                query_text   = gap_query,
+                query_vector = query_vec,
+                limit        = 5,
+                alpha        = 0.6
+            )
+            print(f'[Reasoner:gather_context]   → {len(papers)} context papers')
+        except Exception as e:
+            print(f'[Reasoner:gather_context]   → Error: {e}')
+            papers = []
 
-        print(f'[Reasoner:gather_context] Found {len(papers)} context papers')
-        for p in papers[:3]:
-            print(f'  → {p.get("title", "")[:60]}')
-
-        return {
+        candidates.append({
+            'gap':            gap,
             'context_papers': papers,
-            'status':         f'Gathered {len(papers)} context papers'
-        }
+            'hypothesis':     empty_hypothesis(),
+            'attempts':       0,
+        })
 
-    except Exception as e:
-        print(f'[Reasoner:gather_context] Error: {e}')
-        return {'context_papers': [], 'error': str(e), 'status': 'context gathering failed'}
+    return {
+        'candidates': candidates,
+        'status':     f'Gathered context for {len(candidates)} candidate(s)'
+    }
 
 
 # ── Node 3: Generate Hypothesis ───────────────────────────────────────────
 
-def generate_hypothesis(state: ReasonerState, resources: dict) -> dict:
+def _generate_one_hypothesis(gap: dict, context_papers: List[dict], claude) -> dict:
     """
-    Sends the research gap + context papers to Claude.
-    Claude generates a structured hypothesis.
+    Builds the prompt for a single gap + its context papers, calls Claude,
+    and parses the JSON hypothesis. Raises on failure — the caller decides
+    what to do with a bad candidate rather than this helper swallowing it.
     """
-    print(f'\n[Reasoner:generate_hypothesis] Generating hypothesis...')
+    paper_context = ''
+    for i, paper in enumerate(context_papers[:5], 1):
+        title    = paper.get('title', 'Unknown')
+        abstract = paper.get('abstract', '')[:200]
+        paper_context += f'\nPaper {i}: {title}\n{abstract}\n'
 
-    attempts = state.get('attempts', 0) + 1
+    prompt = f"""Research Gap Analysis:
 
-    if not state['gaps_found']:
-        return {
-            'hypothesis': empty_hypothesis(),
-            'attempts':   attempts,
-            'status':     'no gap available for hypothesis'
-        }
-
-    try:
-        claude   = resources['claude']
-        top_gap  = state['gaps_found'][0]
-
-        # Build context string from papers
-        paper_context = ''
-        for i, paper in enumerate(state['context_papers'][:5], 1):
-            title    = paper.get('title', 'Unknown')
-            abstract = paper.get('abstract', '')[:200]
-            paper_context += f'\nPaper {i}: {title}\n{abstract}\n'
-
-        prompt = f"""Research Gap Analysis:
-
-Concept 1: "{top_gap['concept1']}" (PageRank: {top_gap.get('pagerank1', 0):.2f})
-Concept 2: "{top_gap['concept2']}" (PageRank: {top_gap.get('pagerank2', 0):.2f})
-Community 1: {top_gap.get('community1', 'unknown')}
-Community 2: {top_gap.get('community2', 'unknown')}
-Co-occurrences: {top_gap.get('co_occurrence', 0)} (low = unexplored connection)
-Gap Score: {top_gap.get('gap_score', 0):.2f}
+Concept 1: "{gap['concept1']}" (PageRank: {gap.get('pagerank1', 0):.2f})
+Concept 2: "{gap['concept2']}" (PageRank: {gap.get('pagerank2', 0):.2f})
+Community 1: {gap.get('community1', 'unknown')}
+Community 2: {gap.get('community2', 'unknown')}
+Co-occurrences: {gap.get('co_occurrence', 0)} (low = unexplored connection)
+Gap Score: {gap.get('gap_score', 0):.2f}
 
 Related Papers:{paper_context}
 
@@ -184,78 +171,93 @@ Return ONLY a JSON object with these exact fields:
     "predicted_impact": "what happens if validated"
 }}"""
 
-        message = claude.messages.create(
-            model      = 'claude-sonnet-5',
-            max_tokens = 3000,
-            system     = (
-                'You are a scientific research assistant specializing in cross-domain '
-                'hypothesis generation. Generate novel, testable hypotheses that bridge '
-                'different research areas. Always return valid JSON only.'
-            ),
-            messages   = [{'role': 'user', 'content': prompt}]
-        )
+    message = claude.messages.create(
+        model      = 'claude-sonnet-5',
+        max_tokens = 3000,
+        system     = (
+            'You are a scientific research assistant specializing in cross-domain '
+            'hypothesis generation. Generate novel, testable hypotheses that bridge '
+            'different research areas. Always return valid JSON only.'
+        ),
+        messages   = [{'role': 'user', 'content': prompt}]
+    )
 
-        text = next((b.text for b in message.content if b.type == 'text'), '').strip()
+    text = next((b.text for b in message.content if b.type == 'text'), '').strip()
 
-        # Parse JSON
-        if '```json' in text:
-            text = text.split('```json')[1].split('```')[0].strip()
-        elif '```' in text:
-            text = text.split('```')[1].split('```')[0].strip()
+    if '```json' in text:
+        text = text.split('```json')[1].split('```')[0].strip()
+    elif '```' in text:
+        text = text.split('```')[1].split('```')[0].strip()
 
-        data       = json.loads(text)
-        hypothesis = {
-            'statement':           data.get('statement', ''),
-            'rationale':           data.get('rationale', ''),
-            'supporting_concepts': data.get('supporting_concepts', []),
-            'testability_score':   float(data.get('testability_score', 0.5)),
-            'predicted_impact':    data.get('predicted_impact', ''),
-        }
+    data = json.loads(text)
+    return {
+        'statement':           data.get('statement', ''),
+        'rationale':           data.get('rationale', ''),
+        'supporting_concepts': data.get('supporting_concepts', []),
+        'testability_score':   float(data.get('testability_score', 0.5)),
+        'predicted_impact':    data.get('predicted_impact', ''),
+    }
 
-        print(f'[Reasoner:generate_hypothesis] Generated (attempt {attempts}):')
-        print(f'  Statement:   {hypothesis["statement"][:80]}')
-        print(f'  Testability: {hypothesis["testability_score"]}')
 
-        return {
-            'hypothesis': hypothesis,
-            'attempts':   attempts,
-            'status':     f'Generated hypothesis (attempt {attempts})'
-        }
+def generate_hypothesis(state: ReasonerState, resources: dict) -> dict:
+    """
+    Generates one hypothesis per candidate gap, retrying low-scoring ones up
+    to 3 attempts each. A single candidate's failure (bad Claude response,
+    malformed JSON) does not stop the others from being generated — each
+    candidate is independent.
+    """
+    claude     = resources['claude']
+    candidates = state.get('candidates', [])
+    print(f'\n[Reasoner:generate_hypothesis] Generating {len(candidates)} hypothes(es)...')
 
-    except Exception as e:
-        print(f'[Reasoner:generate_hypothesis] Error: {e}')
-        return {
-            'hypothesis': empty_hypothesis(),
-            'attempts':   attempts,
-            'error':      str(e),
-            'status':     'hypothesis generation failed'
-        }
+    for c in candidates:
+        while True:
+            c['attempts'] += 1
+            try:
+                c['hypothesis'] = _generate_one_hypothesis(c['gap'], c['context_papers'], claude)
+                print(f'[Reasoner:generate_hypothesis] "{c["gap"]["concept1"]} ↔ {c["gap"]["concept2"]}" '
+                      f'(attempt {c["attempts"]}): {c["hypothesis"]["statement"][:80]}')
+            except Exception as e:
+                print(f'[Reasoner:generate_hypothesis] Error on '
+                      f'"{c["gap"]["concept1"]} ↔ {c["gap"]["concept2"]}": {e}')
+                c['hypothesis'] = empty_hypothesis()
+                break
+
+            if should_retry_hypothesis({'hypothesis': c['hypothesis'], 'attempts': c['attempts']}) == 'store':
+                break
+
+    return {
+        'candidates': candidates,
+        'status':     f'Generated {len(candidates)} hypothes(es)'
+    }
 
 
 # ── Node 4: Store Hypothesis ──────────────────────────────────────────────
 
 def store_hypothesis(state: ReasonerState, resources: dict) -> dict:
     """
-    Stores the validated hypothesis as a node in Neo4j.
-    Links it to its source concepts.
+    Stores every generated candidate with a real statement as a Hypothesis
+    node in Neo4j, linking it to its source concepts (DERIVED_FROM) and the
+    papers it was built from (CITES), so a student can jump into the
+    literature a hypothesis actually came from.
     """
-    print(f'\n[Reasoner:store_hypothesis] Storing hypothesis...')
+    neo4j  = resources['neo4j']
+    stored = []
 
-    h = state['hypothesis']
-    if not h or not h.get('statement'):
-        return {'status': 'nothing to store', 'hypothesis_id': ''}
+    for c in state.get('candidates', []):
+        h = c['hypothesis']
+        if not h or not h.get('statement'):
+            continue
 
-    try:
-        neo4j        = resources['neo4j']
         hypothesis_id = f'hyp_{uuid.uuid4().hex[:12]}'
 
-        # Store hypothesis node
         query = """
             MERGE (h:Hypothesis {id: $id})
             SET h.statement         = $statement,
                 h.rationale         = $rationale,
                 h.testability_score = $testability_score,
                 h.predicted_impact  = $predicted_impact,
+                h.seed_concept      = $seed_concept,
                 h.status            = 'proposed',
                 h.created_by        = 'Reasoner'
             RETURN h
@@ -266,10 +268,10 @@ def store_hypothesis(state: ReasonerState, resources: dict) -> dict:
                 statement         = h['statement'],
                 rationale         = h['rationale'],
                 testability_score = h['testability_score'],
-                predicted_impact  = h['predicted_impact']
+                predicted_impact  = h['predicted_impact'],
+                seed_concept      = state['seed_concept'],
             )
 
-        # Link to source concepts
         for concept_name in h.get('supporting_concepts', []):
             link_query = """
                 MATCH (h:Hypothesis {id: $hyp_id})
@@ -282,30 +284,42 @@ def store_hypothesis(state: ReasonerState, resources: dict) -> dict:
                     concept_name = concept_name.lower()
                 )
 
+        for rank, paper in enumerate(c['context_papers'][:5], start=1):
+            paper_id = paper.get('paper_id', '')
+            if not paper_id:
+                continue
+            cite_query = """
+                MATCH (h:Hypothesis {id: $hyp_id})
+                MATCH (p:Paper {id: $paper_id})
+                MERGE (h)-[r:CITES]->(p)
+                SET r.rank = $rank, r.hybrid_score = $score
+            """
+            with neo4j.driver.session() as session:
+                session.run(cite_query,
+                    hyp_id   = hypothesis_id,
+                    paper_id = paper_id,
+                    rank     = rank,
+                    score    = paper.get('score', 0.0),
+                )
+
         print(f'[Reasoner:store_hypothesis] Stored as: {hypothesis_id}')
+        stored.append({'hypothesis_id': hypothesis_id, 'hypothesis': h})
 
-        return {
-            'hypothesis_id': hypothesis_id,
-            'status':        f'Hypothesis stored: {hypothesis_id}'
-        }
-
-    except Exception as e:
-        print(f'[Reasoner:store_hypothesis] Error: {e}')
-        return {
-            'hypothesis_id': '',
-            'error':         str(e),
-            'status':        'storage failed'
-        }
+    return {
+        'stored': stored,
+        'status': f'Stored {len(stored)} hypothes(es)'
+    }
 
 
 # ── Routing Logic ─────────────────────────────────────────────────────────
 
-def should_retry_hypothesis(state: ReasonerState) -> str:
+def should_retry_hypothesis(state: dict) -> str:
     """
-    If hypothesis quality is too low, retry generation.
-    Max 3 attempts.
+    If hypothesis quality is too low, retry generation. Max 3 attempts.
+    Takes a small {hypothesis, attempts} dict rather than the full
+    ReasonerState so it works as a pure per-candidate decision function.
     """
-    h = state.get('hypothesis', {})
+    h        = state.get('hypothesis', {})
     score    = h.get('testability_score', 0.0)
     attempts = state.get('attempts', 0)
 
@@ -340,22 +354,13 @@ def build_reasoner(resources: dict):
 
     trace(graph, 'select_seed',         node_seed,     watch=['status', 'error'])
     trace(graph, 'gather_context',      node_context,  watch=['status', 'error'])
-    trace(graph, 'generate_hypothesis', node_generate, watch=['status', 'attempts', 'error'])
-    trace(graph, 'store_hypothesis',    node_store,    watch=['status', 'hypothesis_id', 'error'])
+    trace(graph, 'generate_hypothesis', node_generate, watch=['status', 'error'])
+    trace(graph, 'store_hypothesis',    node_store,    watch=['status', 'error'])
 
-    graph.add_edge('select_seed',    'gather_context')
-    graph.add_edge('gather_context', 'generate_hypothesis')
-
-    graph.add_conditional_edges(
-        'generate_hypothesis',
-        should_retry_hypothesis,
-        {
-            'store': 'store_hypothesis',
-            'retry': 'generate_hypothesis',
-        }
-    )
-
-    graph.add_edge('store_hypothesis', END)
+    graph.add_edge('select_seed',         'gather_context')
+    graph.add_edge('gather_context',      'generate_hypothesis')
+    graph.add_edge('generate_hypothesis', 'store_hypothesis')
+    graph.add_edge('store_hypothesis',    END)
     graph.set_entry_point('select_seed')
 
     return graph.compile()
@@ -370,26 +375,24 @@ if __name__ == '__main__':
     reasoner  = build_reasoner(resources)
 
     initial_state = {
-        'seed_concept':   'large language models',
-        'gaps_found':     [],
-        'context_papers': [],
-        'hypothesis':     empty_hypothesis(),
-        'hypothesis_id':  '',
-        'attempts':       0,
-        'status':         'starting',
-        'error':          ''
+        'seed_concept': 'large language models',
+        'gaps_found':   [],
+        'candidates':   [],
+        'stored':       [],
+        'status':       'starting',
+        'error':        ''
     }
 
     final_state = reasoner.invoke(initial_state)
 
     print(f'\n=== Reasoner Complete ===')
-    print(f'Status:       {final_state["status"]}')
-    print(f'Hypothesis ID: {final_state["hypothesis_id"]}')
-    if final_state['hypothesis']['statement']:
-        print(f'\nHypothesis:')
-        print(f'  {final_state["hypothesis"]["statement"]}')
-        print(f'\nTestability: {final_state["hypothesis"]["testability_score"]}')
-        print(f'Impact:      {final_state["hypothesis"]["predicted_impact"][:100]}')
+    print(f'Status: {final_state["status"]}')
+    print(f'Generated {len(final_state.get("stored", []))} hypothes(es):')
+    for item in final_state.get('stored', []):
+        h = item['hypothesis']
+        print(f'\n  [{item["hypothesis_id"]}]')
+        print(f'  {h["statement"]}')
+        print(f'  Testability: {h["testability_score"]}')
 
     resources['neo4j'].close()
     resources['weaviate'].close()

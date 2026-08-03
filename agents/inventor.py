@@ -1,5 +1,6 @@
 # agents/inventor.py
-# APEX Inventor Agent — drafts patents from validated hypotheses
+# APEX Inventor Agent — checks prior art and drafts a next-steps research
+# plan for validated hypotheses
 
 import sys
 import os
@@ -13,6 +14,8 @@ from langgraph.graph import StateGraph, END
 from dotenv import load_dotenv
 
 from database.neo4j_client import Neo4jClient
+from database.weaviate_client import WeaviateClient
+from database.embedder import Embedder
 from events.node_tracing import node_tracer
 
 load_dotenv(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), '.env'))
@@ -24,9 +27,10 @@ class InventorState(TypedDict):
     hypothesis_id:   str
     hypothesis:      dict
     novelty_score:   float
+    prior_art:       list
     sim_result:      dict
-    patent_draft:    dict
-    patent_id:       str
+    plan_draft:      dict
+    plan_id:         str
     status:          str
     error:           str
 
@@ -35,15 +39,24 @@ class InventorState(TypedDict):
 
 def get_resources():
     return {
-        'neo4j':  Neo4jClient(),
-        'claude': anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY')),
+        'neo4j':    Neo4jClient(),
+        'weaviate': WeaviateClient(),
+        'embedder': Embedder(),
+        'claude':   anthropic.Anthropic(api_key=os.getenv('ANTHROPIC_API_KEY')),
     }
 
 
 # ── Node 1: Load and Check Novelty ────────────────────────────────────────
 
 def check_novelty(state: InventorState, resources: dict) -> dict:
-    """Loads hypothesis and computes novelty score."""
+    """
+    Loads the hypothesis and checks it against the real paper corpus via
+    semantic search — "is this already been done?" rather than the old
+    self-referential check of whether APEX itself had generated something
+    similar before. Runs (and persists) regardless of whether the hypothesis
+    ends up passing the patent/plan gate, since the closest existing papers
+    are exactly what a student needs to see when a direction gets filtered out.
+    """
     print(f'\n[Inventor:check_novelty] Loading: {state["hypothesis_id"]}')
 
     neo4j = resources['neo4j']
@@ -54,7 +67,10 @@ def check_novelty(state: InventorState, resources: dict) -> dict:
                    h.rationale AS rationale,
                    h.testability_score AS testability_score,
                    h.predicted_impact AS predicted_impact,
-                   h.debate_score AS debate_score
+                   h.debate_score AS debate_score,
+                   h.status AS verdict,
+                   h.rebuttal AS rebuttal,
+                   h.counterarguments AS counterarguments
         """, id=state['hypothesis_id'])
         record = result.single()
 
@@ -77,23 +93,47 @@ def check_novelty(state: InventorState, resources: dict) -> dict:
 
     hypothesis['supporting_concepts'] = concepts
 
-    # Compute novelty based on concept overlap with existing hypotheses
-    shared = 0
-    for concept in concepts:
-        with neo4j.driver.session() as session:
-            result = session.run("""
-                MATCH (h:Hypothesis)-[:DERIVED_FROM]->(c:Concept {name: $name})
-                WHERE h.id <> $hyp_id
-                RETURN count(h) AS n
-            """, name=concept, hyp_id=state['hypothesis_id'])
-            shared += result.single()['n']
+    # Real prior-art check: semantic search the actual corpus for papers
+    # closest to this hypothesis's statement.
+    embedder = resources['embedder']
+    weaviate = resources['weaviate']
+    query_vec = embedder.embed_text(hypothesis.get('statement', ''))
+    matches = weaviate.vector_search(query_vec, limit=5)
 
-    novelty_score = max(0.1, 1.0 - (shared * 0.1))
-    print(f'[Inventor:check_novelty] Novelty: {novelty_score} | Concepts: {concepts}')
+    prior_art = [
+        {
+            'paper_id':   m.get('paper_id', ''),
+            'title':      m.get('title', ''),
+            'year':       m.get('year', 0),
+            'similarity': round(max(0.0, 1.0 - m.get('distance', 1.0)), 4),
+        }
+        for m in matches
+    ]
+    top_similarity = prior_art[0]['similarity'] if prior_art else 0.0
+    novelty_score = round(max(0.0, 1.0 - top_similarity), 4) if prior_art else 1.0
+
+    with neo4j.driver.session() as session:
+        session.run(
+            'MATCH (h:Hypothesis {id: $id}) SET h.novelty_score = $novelty',
+            id=state['hypothesis_id'], novelty=novelty_score,
+        )
+        for pa in prior_art:
+            if not pa['paper_id']:
+                continue
+            session.run("""
+                MATCH (h:Hypothesis {id: $hyp_id})
+                MATCH (p:Paper {id: $paper_id})
+                MERGE (h)-[r:SIMILAR_TO]->(p)
+                SET r.similarity = $similarity
+            """, hyp_id=state['hypothesis_id'], paper_id=pa['paper_id'], similarity=pa['similarity'])
+
+    print(f'[Inventor:check_novelty] Novelty: {novelty_score} | Closest match: '
+          f'{prior_art[0]["title"][:60] if prior_art else "none found"}')
 
     return {
-        'hypothesis':   hypothesis,
+        'hypothesis':    hypothesis,
         'novelty_score': novelty_score,
+        'prior_art':     prior_art,
         'status':        f'novelty checked: {novelty_score}'
     }
 
@@ -133,56 +173,85 @@ def run_simulation(state: InventorState, resources: dict) -> dict:
     return {'sim_result': sim_result, 'status': 'simulation complete'}
 
 
-# ── Routing: Should We Patent? ────────────────────────────────────────────
+# ── Routing: Should We Draft a Plan? ──────────────────────────────────────
 
-def should_patent(state: InventorState) -> str:
-    """Only proceed to patent drafting if novelty and simulation pass."""
+def should_draft_plan(state: InventorState) -> str:
+    """Only proceed to research-plan drafting if novelty and simulation pass."""
     novelty  = state.get('novelty_score', 0.0)
     sim_rate = state.get('sim_result', {}).get('success_rate', 0.0)
 
     if novelty >= 0.5 and sim_rate >= 0.6:
-        print(f'  [router] Novelty {novelty:.2f} + Sim {sim_rate:.2f} → drafting patent')
+        print(f'  [router] Novelty {novelty:.2f} + Sim {sim_rate:.2f} → drafting research plan')
         return 'draft'
     else:
         print(f'  [router] Novelty {novelty:.2f} or Sim {sim_rate:.2f} too low → skip')
         return 'skip'
 
 
-def skip_patent(state: InventorState, resources: dict) -> dict:
-    return {'status': 'patent skipped — insufficient novelty or simulation score'}
+def skip_plan(state: InventorState, resources: dict) -> dict:
+    return {'status': 'research plan skipped — insufficient novelty or simulation score'}
 
 
-# ── Node 3: Draft Patent ──────────────────────────────────────────────────
+# ── Node 3: Draft Research Plan ───────────────────────────────────────────
 
-def draft_patent(state: InventorState, resources: dict) -> dict:
-    """Uses Claude to draft structured patent claims."""
-    print(f'\n[Inventor:draft_patent] Drafting patent...')
+def draft_research_plan(state: InventorState, resources: dict) -> dict:
+    """
+    Uses Claude to synthesize a practical next-steps research plan for a
+    student — not a patent claim. Grounded in the hypothesis, the adversarial
+    debate that already happened, and the real prior-art search from
+    check_novelty, so the advice is specific rather than generic encouragement.
+    """
+    print(f'\n[Inventor:draft_research_plan] Drafting research plan...')
 
     h      = state['hypothesis']
     claude = resources['claude']
 
-    concepts = h.get('supporting_concepts', [])
-    impact   = h.get('predicted_impact', '')
+    counterarguments = h.get('counterarguments') or []
+    counterargs_text = '; '.join(counterarguments) if counterarguments else 'none recorded'
 
-    prompt = f"""Draft a patent application for this invention:
+    prior_art_text = '\n'.join(
+        f'- "{pa["title"]}" ({pa["year"]}) — similarity {pa["similarity"]}'
+        for pa in state.get('prior_art', [])
+    ) or 'No close matches found in the corpus.'
 
-Invention: {h.get('statement', '')}
-Key Concepts: {', '.join(concepts)}
-Expected Impact: {impact}
+    prompt = f"""A student is considering this research direction:
 
-Return ONLY a JSON object:
+Hypothesis: {h.get('statement', '')}
+Rationale: {h.get('rationale', '')}
+Predicted impact if validated: {h.get('predicted_impact', '')}
+Testability score (0-1, from initial screening): {h.get('testability_score', 0.0)}
+
+Adversarial review already completed:
+- Counterarguments raised: {counterargs_text}
+- Rebuttal: {h.get('rebuttal', '')}
+- Debate verdict: {h.get('verdict', '')} (score {h.get('debate_score', 0.0)})
+
+Closest existing papers found via semantic search of the corpus (NOT an exhaustive
+literature review — treat as a starting point):
+{prior_art_text}
+
+Given all of this, write a practical next-steps research plan for the student. Be
+concrete and specific to this hypothesis, not generic advice.
+
+Return ONLY a JSON object with these exact fields:
 {{
-    "title": "Patent title",
-    "background": "Background (2-3 sentences)",
-    "summary": "Summary (2-3 sentences)",
-    "independent_claim_1": "Broadest independent claim",
-    "dependent_claim_2": "Dependent claim adding specificity",
-    "abstract": "Abstract (100 words max)"
+    "methodology_sketch": "2-4 sentences: the general experimental or analytical approach that would test this hypothesis",
+    "resources_needed": ["3-6 short items: datasets, tools, compute, or domain expertise required"],
+    "first_experiment": "one concrete, scoped experiment or analysis the student could start within the next few weeks",
+    "key_related_papers": ["2-4 short notes on which of the papers above matter most and why, or gaps in what's known"],
+    "open_risks": ["2-4 specific risks: concrete failure modes, not generic caveats"],
+    "novelty_assessment": "1-3 sentences: given the closest existing papers above, is this direction meaningfully different from what's already been done, and how?"
 }}"""
 
     message = claude.messages.create(
         model      = 'claude-sonnet-5',
-        max_tokens = 3000,
+        max_tokens = 2500,
+        system     = (
+            'You are an experienced research advisor helping a graduate student '
+            'evaluate whether a research direction is worth pursuing. Be honest and '
+            'specific — flag real risks and gaps, not just encouragement. Always '
+            'return valid JSON only.'
+        ),
         messages   = [{'role': 'user', 'content': prompt}]
     )
 
@@ -192,52 +261,58 @@ Return ONLY a JSON object:
     elif '```' in text:
         text = text.split('```')[1].split('```')[0].strip()
 
-    patent_draft = json.loads(text)
-    print(f'[Inventor:draft_patent] Title: {patent_draft.get("title", "")}')
+    plan_draft = json.loads(text)
+    print(f'[Inventor:draft_research_plan] First experiment: {plan_draft.get("first_experiment", "")[:80]}')
 
-    return {'patent_draft': patent_draft, 'status': 'patent drafted'}
+    return {'plan_draft': plan_draft, 'status': 'research plan drafted'}
 
 
-# ── Node 4: Store Patent ──────────────────────────────────────────────────
+# ── Node 4: Store Research Plan ───────────────────────────────────────────
 
-def store_patent(state: InventorState, resources: dict) -> dict:
-    """Stores Patent node in Neo4j linked to the hypothesis."""
-    print(f'\n[Inventor:store_patent] Storing patent...')
+def store_research_plan(state: InventorState, resources: dict) -> dict:
+    """Stores a ResearchPlan node in Neo4j linked to the hypothesis, keeping
+    every field the prompt asked for (the old patent-draft code silently
+    dropped 2 of 6 fields here — don't repeat that)."""
+    print(f'\n[Inventor:store_research_plan] Storing research plan...')
 
-    neo4j      = resources['neo4j']
-    patent_id  = f'pat_{uuid.uuid4().hex[:12]}'
-    draft      = state['patent_draft']
+    neo4j   = resources['neo4j']
+    plan_id = f'plan_{uuid.uuid4().hex[:12]}'
+    draft   = state['plan_draft']
 
     with neo4j.driver.session() as session:
         session.run("""
-            MERGE (p:Patent {id: $id})
-            SET p.title                = $title,
-                p.background           = $background,
-                p.independent_claim_1  = $claim1,
-                p.abstract             = $abstract,
-                p.novelty_score        = $novelty,
-                p.simulation_score     = $sim_score,
-                p.status               = 'draft'
-            RETURN p
+            MERGE (pl:ResearchPlan {id: $id})
+            SET pl.methodology_sketch  = $methodology_sketch,
+                pl.resources_needed    = $resources_needed,
+                pl.first_experiment    = $first_experiment,
+                pl.key_related_papers  = $key_related_papers,
+                pl.open_risks          = $open_risks,
+                pl.novelty_assessment  = $novelty_assessment,
+                pl.novelty_score       = $novelty,
+                pl.feasibility_score   = $feasibility_score,
+                pl.status              = 'draft'
+            RETURN pl
         """,
-            id         = patent_id,
-            title      = draft.get('title', ''),
-            background = draft.get('background', ''),
-            claim1     = draft.get('independent_claim_1', ''),
-            abstract   = draft.get('abstract', ''),
-            novelty    = state['novelty_score'],
-            sim_score  = state['sim_result'].get('success_rate', 0)
+            id                  = plan_id,
+            methodology_sketch  = draft.get('methodology_sketch', ''),
+            resources_needed    = draft.get('resources_needed', []),
+            first_experiment    = draft.get('first_experiment', ''),
+            key_related_papers  = draft.get('key_related_papers', []),
+            open_risks          = draft.get('open_risks', []),
+            novelty_assessment  = draft.get('novelty_assessment', ''),
+            novelty             = state['novelty_score'],
+            feasibility_score   = state['sim_result'].get('success_rate', 0)
         )
 
-        # Link Patent to Hypothesis
+        # Link ResearchPlan to Hypothesis
         session.run("""
             MATCH (h:Hypothesis {id: $hyp_id})
-            MATCH (p:Patent {id: $pat_id})
-            MERGE (h)-[:LED_TO]->(p)
-        """, hyp_id=state['hypothesis_id'], pat_id=patent_id)
+            MATCH (pl:ResearchPlan {id: $plan_id})
+            MERGE (h)-[:HAS_PLAN]->(pl)
+        """, hyp_id=state['hypothesis_id'], plan_id=plan_id)
 
-    print(f'[Inventor:store_patent] Stored: {patent_id}')
-    return {'patent_id': patent_id, 'status': f'patent stored: {patent_id}'}
+    print(f'[Inventor:store_research_plan] Stored: {plan_id}')
+    return {'plan_id': plan_id, 'status': f'research plan stored: {plan_id}'}
 
 
 # ── Build Graph ───────────────────────────────────────────────────────────
@@ -250,35 +325,35 @@ def build_inventor(resources: dict):
         return run_simulation(state, resources)
 
     def node_draft(state):
-        return draft_patent(state, resources)
+        return draft_research_plan(state, resources)
 
     def node_store(state):
-        return store_patent(state, resources)
+        return store_research_plan(state, resources)
 
     def node_skip(state):
-        return skip_patent(state, resources)
+        return skip_plan(state, resources)
 
     graph = StateGraph(InventorState)
     trace = node_tracer('inventor')
 
-    trace(graph, 'check_novelty',  node_novelty, watch=['status', 'novelty_score', 'error'])
-    trace(graph, 'run_simulation', node_sim,     watch=['status'])
-    trace(graph, 'draft_patent',   node_draft,   watch=['status'])
-    trace(graph, 'store_patent',   node_store,   watch=['status', 'patent_id'])
-    trace(graph, 'skip_patent',    node_skip,    watch=['status'])
+    trace(graph, 'check_novelty',        node_novelty, watch=['status', 'novelty_score', 'error'])
+    trace(graph, 'run_simulation',       node_sim,     watch=['status'])
+    trace(graph, 'draft_research_plan',  node_draft,   watch=['status'])
+    trace(graph, 'store_research_plan',  node_store,   watch=['status', 'plan_id'])
+    trace(graph, 'skip_plan',            node_skip,    watch=['status'])
 
     graph.add_edge('check_novelty', 'run_simulation')
     graph.add_conditional_edges(
         'run_simulation',
-        should_patent,
+        should_draft_plan,
         {
-            'draft': 'draft_patent',
-            'skip':  'skip_patent',
+            'draft': 'draft_research_plan',
+            'skip':  'skip_plan',
         }
     )
-    graph.add_edge('draft_patent', 'store_patent')
-    graph.add_edge('store_patent', END)
-    graph.add_edge('skip_patent',  END)
+    graph.add_edge('draft_research_plan', 'store_research_plan')
+    graph.add_edge('store_research_plan', END)
+    graph.add_edge('skip_plan',           END)
 
     graph.set_entry_point('check_novelty')
     return graph.compile()
@@ -315,22 +390,23 @@ if __name__ == '__main__':
         'hypothesis_id': hypothesis_id,
         'hypothesis':    {},
         'novelty_score': 0.0,
+        'prior_art':     [],
         'sim_result':    {},
-        'patent_draft':  {},
-        'patent_id':     '',
+        'plan_draft':    {},
+        'plan_id':       '',
         'status':        'starting',
         'error':         ''
     })
 
     print(f'\n=== Inventor Complete ===')
     print(f'Hypothesis ID: {hypothesis_id}')
-    print(f'Patent ID:     {final_state["patent_id"]}')
+    print(f'Plan ID:       {final_state["plan_id"]}')
     print(f'Novelty:       {final_state["novelty_score"]}')
     print(f'Sim Score:     {final_state["sim_result"].get("success_rate", 0)}')
     print(f'Status:        {final_state["status"]}')
 
-    if final_state['patent_draft']:
-        print(f'\nPatent Title:  {final_state["patent_draft"].get("title", "")}')
-        print(f'Claim 1:       {final_state["patent_draft"].get("independent_claim_1", "")[:100]}')
+    if final_state['plan_draft']:
+        print(f'\nFirst experiment: {final_state["plan_draft"].get("first_experiment", "")[:100]}')
 
     resources['neo4j'].close()
+    resources['weaviate'].close()

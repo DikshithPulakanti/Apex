@@ -11,6 +11,7 @@ export async function GET() {
     const [concepts] = await runQuery('MATCH (c:Concept) RETURN count(c) AS count')
     const [hypotheses] = await runQuery('MATCH (h:Hypothesis) RETURN count(h) AS count')
     const [patents] = await runQuery('MATCH (p:Patent) RETURN count(p) AS count')
+    const [plans] = await runQuery('MATCH (pl:ResearchPlan) RETURN count(pl) AS count')
     const [validated] = await runQuery("MATCH (h:Hypothesis {status: 'validated'}) RETURN count(h) AS count")
     const [rejected] = await runQuery("MATCH (h:Hypothesis {status: 'rejected'}) RETURN count(h) AS count")
     const [relationships] = await runQuery('MATCH ()-[r]->() RETURN count(r) AS count')
@@ -21,6 +22,7 @@ export async function GET() {
       concepts: (concepts.count as any).toNumber?.() ?? concepts.count,
       hypotheses: (hypotheses.count as any).toNumber?.() ?? hypotheses.count,
       patents: (patents.count as any).toNumber?.() ?? patents.count,
+      researchPlans: (plans.count as any).toNumber?.() ?? plans.count,
       validated: (validated.count as any).toNumber?.() ?? validated.count,
       rejected: (rejected.count as any).toNumber?.() ?? rejected.count,
       relationships: (relationships.count as any).toNumber?.() ?? relationships.count,

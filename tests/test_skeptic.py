@@ -132,6 +132,7 @@ def test_update_hypothesis_status_writes_validated_verdict(fake_neo4j):
     fake_neo4j.fake_session.run.assert_called_once()
     _, kwargs = fake_neo4j.fake_session.run.call_args
     assert kwargs['status'] == 'validated'
+    assert kwargs['counterarguments'] == ['c1', 'c2', 'c3']
     assert 'validated' in result['status']
 
 

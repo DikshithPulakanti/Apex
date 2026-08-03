@@ -24,7 +24,8 @@ TOPICS = [
     'hypothesis.created',     # Reasoner → Skeptic
     'hypothesis.validated',   # Skeptic → Inventor
     'hypothesis.rejected',    # Skeptic → logs
-    'patent.drafted',         # Inventor → Frontend
+    'patent.drafted',         # Inventor → Frontend (legacy patent-drafting path, unused)
+    'research_plan.created',  # Inventor → Frontend
     'agent.status',           # All agents → Frontend (heartbeat/progress)
 ]
 
